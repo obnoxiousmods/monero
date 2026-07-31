@@ -40,6 +40,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include "common/apply_permutation.h"
 #include "transport.hpp"
+#include "protocol_thp.hpp"
 #include "messages/messages-common.pb.h"
 
 #undef MONERO_DEFAULT_LOG_CATEGORY
@@ -553,6 +554,7 @@ namespace trezor{
     }
 
     m_proto = proto ? proto.get() : std::make_shared<ProtocolV1>();
+    m_proto_explicit = (bool)proto;
   }
 
   std::string UdpTransport::get_path() const {
@@ -873,6 +875,7 @@ namespace trezor{
     }
 
     m_proto = proto ? proto.get() : std::make_shared<ProtocolV1>();
+    m_proto_explicit = (bool)proto;
 
 #ifdef WITH_TREZOR_DEBUGGING
     m_debug_mode = false;
@@ -1041,8 +1044,21 @@ namespace trezor{
     }
 
     m_open_counter = 1;
+
+    // Devices whose firmware is built with the THP feature (currently the
+    // Trezor Safe 7 / T3W1) do not serve the legacy codec at all, and they
+    // share a USB vendor/product id with the models that do. Ask the device
+    // which protocol it speaks rather than guessing from the descriptor.
+    if (!m_proto_explicit && !std::dynamic_pointer_cast<ProtocolThp>(m_proto)){
+      if (ProtocolThp::probe(*this)){
+        auto thp_proto = std::make_shared<ProtocolThp>();
+        thp_proto->set_pairing_ui(m_pairing_ui);
+        m_proto = thp_proto;
+      }
+    }
+
     m_proto->session_begin(*this);
-    
+
 #undef TREZOR_DESTROY_SESSION
   };
 
@@ -1148,6 +1164,20 @@ namespace trezor{
     }
 
     return transferred;
+  };
+
+  size_t WebUsbTransport::read_chunk_timeout(void * buff, size_t size, unsigned timeout_ms) {
+    require_connected();
+    unsigned char endpoint = get_endpoint();
+    endpoint = (endpoint & ~LIBUSB_ENDPOINT_DIR_MASK) | LIBUSB_ENDPOINT_IN;
+
+    int transferred = 0;
+    int r = libusb_interrupt_transfer(m_usb_device_handle, endpoint, (unsigned char*)buff, (int)size, &transferred, timeout_ms);
+    if (r == LIBUSB_ERROR_TIMEOUT){
+      return 0;
+    }
+    CHECK_AND_ASSERT_THROW_MES(r == 0, "Unable to transfer, r: " << r);
+    return (size_t)transferred;
   };
 
   std::ostream& WebUsbTransport::dump(std::ostream& o) const {

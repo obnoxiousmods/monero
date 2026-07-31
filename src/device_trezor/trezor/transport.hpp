@@ -118,6 +118,8 @@ namespace trezor {
   // Forward decl
   class Transport;
   class Protocol;
+  class ProtocolThp;
+  namespace thp { class PairingUI; }
 
   // Communication protocol
   class Protocol {
@@ -159,9 +161,27 @@ namespace trezor {
 
     virtual void write_chunk(const void * buff, size_t size) { };
     virtual size_t read_chunk(void * buff, size_t size) { return 0; };
+
+    /**
+     * Bounded variant of read_chunk, used to probe for a protocol without
+     * risking an indefinite block on a device that will never answer.
+     * Returns 0 on timeout. The default implementation ignores the timeout.
+     */
+    virtual size_t read_chunk_timeout(void * buff, size_t size, unsigned timeout_ms) { return read_chunk(buff, size); };
     virtual std::ostream& dump(std::ostream& o) const { return o << "Transport<>"; }
+
+    /**
+     * Supply the UI used for THP pairing interaction. Ignored by transports and
+     * devices that speak the legacy protocol.
+     */
+    virtual void set_pairing_ui(std::shared_ptr<thp::PairingUI> ui) { m_pairing_ui = std::move(ui); };
+
   protected:
     long m_open_counter;
+
+    /** True when the caller pinned a protocol, disabling auto-detection. */
+    bool m_proto_explicit = false;
+    std::shared_ptr<thp::PairingUI> m_pairing_ui;
 
     virtual bool pre_open();
     virtual bool pre_close();
@@ -276,6 +296,7 @@ namespace trezor {
 
     void write_chunk(const void * buff, size_t size) override;
     size_t read_chunk(void * buff, size_t size) override;
+    size_t read_chunk_timeout(void * buff, size_t size, unsigned timeout_ms) override;
 
     std::ostream& dump(std::ostream& o) const override;
 
