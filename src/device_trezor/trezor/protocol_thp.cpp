@@ -848,14 +848,25 @@ void ProtocolThp::request_credential(Transport &transport) {
   req.set_host_static_public_key(m_host_static_pub.data(), m_host_static_pub.size());
 
   // Autoconnect lets later connections skip the confirmation dialog, but the
-  // firmware refuses to issue such a credential directly after pairing - it
-  // will only upgrade one we already hold. Asking anyway raises a DataError
-  // inside the device's pairing workflow, which then fails every subsequent
-  // message on the channel. So ask for it only when replaying a credential.
-  const bool have_credential = !m_credential.empty();
-  req.set_autoconnect(have_credential);
-  if (have_credential)
-    req.set_credential(m_credential.data(), m_credential.size());
+  // firmware will only issue such a credential as an upgrade to one the channel
+  // already carries:
+  //
+  //     if autoconnect and ctx.channel_ctx.credential is None:
+  //         raise DataError("Cannot ask for autoconnect credential after pairing")
+  //
+  // and that DataError fails every later message on the channel, surfacing as
+  // "Firmware error" at the end of the handshake.
+  //
+  // This is only ever reached when the channel has no credential - either we
+  // just paired from scratch, or we are paired but the device matched no stored
+  // credential - so the answer is always no. Deciding from whether a credential
+  // happens to be sitting in the local store is wrong: one left over from an
+  // earlier connection is not on this channel, and after a fresh pairing it is
+  // exactly the case the firmware rejects.
+  req.set_autoconnect(false);
+  // For the same reason no credential is sent: the field is meant for upgrading
+  // the one the channel already carries, and anything in the local store here
+  // belongs to a different pairing than the one just completed.
   write_app(transport, 0, wire_type::ThpCredentialRequest, serialize_proto(req));
 
   bytes payload;
