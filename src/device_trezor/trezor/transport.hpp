@@ -173,6 +173,15 @@ namespace trezor {
     virtual size_t read_chunk(void * buff, size_t size) { return 0; };
 
     /**
+     * Packet size of the underlying data transfer layer.
+     *
+     * THP frames are segmented to this size. USB uses 64 bytes; Bluetooth Low
+     * Energy uses 244, so this is a property of the transport rather than a
+     * constant of the protocol.
+     */
+    virtual size_t packet_size() const { return 64; };
+
+    /**
      * Bounded variant of read_chunk, used to probe for a protocol without
      * risking an indefinite block on a device that will never answer.
      * Returns 0 on timeout. The default implementation ignores the timeout.

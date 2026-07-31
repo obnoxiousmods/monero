@@ -175,15 +175,18 @@ std::string Message::to_string() const {
 
 void write_message(Transport &transport, const Message &msg) {
   const bytes payload = msg.to_bytes();
+  const size_t packet_size = transport.packet_size();
+  CHECK_AND_ASSERT_THROW_MES(packet_size > INIT_HEADER_LENGTH,
+                             "THP: transport packet size is too small");
 
-  uint8_t packet[THP_PACKET_SIZE];
+  std::vector<uint8_t> packet(packet_size);
   size_t offset = 0;
 
   // Initiation packet: the header is already at the front of `payload`.
-  const size_t first = std::min(payload.size(), THP_PACKET_SIZE);
-  memcpy(packet, payload.data(), first);
-  if (first < THP_PACKET_SIZE) memset(packet + first, 0, THP_PACKET_SIZE - first);
-  transport.write_chunk(packet, THP_PACKET_SIZE);
+  const size_t first = std::min(payload.size(), packet_size);
+  memcpy(packet.data(), payload.data(), first);
+  if (first < packet_size) memset(packet.data() + first, 0, packet_size - first);
+  transport.write_chunk(packet.data(), packet_size);
   offset = first;
 
   // Continuation packets.
@@ -192,19 +195,20 @@ void write_message(Transport &transport, const Message &msg) {
     packet[1] = static_cast<uint8_t>((msg.cid >> 8) & 0xFF);
     packet[2] = static_cast<uint8_t>(msg.cid & 0xFF);
     const size_t to_copy =
-        std::min(payload.size() - offset, THP_PACKET_SIZE - CONT_HEADER_LENGTH);
-    memcpy(packet + CONT_HEADER_LENGTH, payload.data() + offset, to_copy);
-    if (to_copy < THP_PACKET_SIZE - CONT_HEADER_LENGTH) {
-      memset(packet + CONT_HEADER_LENGTH + to_copy, 0,
-             THP_PACKET_SIZE - CONT_HEADER_LENGTH - to_copy);
+        std::min(payload.size() - offset, packet_size - CONT_HEADER_LENGTH);
+    memcpy(packet.data() + CONT_HEADER_LENGTH, payload.data() + offset, to_copy);
+    if (to_copy < packet_size - CONT_HEADER_LENGTH) {
+      memset(packet.data() + CONT_HEADER_LENGTH + to_copy, 0,
+             packet_size - CONT_HEADER_LENGTH - to_copy);
     }
-    transport.write_chunk(packet, THP_PACKET_SIZE);
+    transport.write_chunk(packet.data(), packet_size);
     offset += to_copy;
   }
 }
 
 Message read_message(Transport &transport, size_t max_retries) {
-  uint8_t packet[THP_PACKET_SIZE];
+  const size_t packet_size = transport.packet_size();
+  std::vector<uint8_t> packet(packet_size);
 
   for (size_t attempt = 0; attempt <= max_retries; ++attempt) {
     // Read an initiation packet, skipping stray continuations.
@@ -215,8 +219,8 @@ Message read_message(Transport &transport, size_t max_retries) {
     bytes acc;
 
     while (!have_init) {
-      const size_t nread = transport.read_chunk(packet, THP_PACKET_SIZE);
-      CHECK_AND_ASSERT_THROW_MES(nread == THP_PACKET_SIZE,
+      const size_t nread = transport.read_chunk(packet.data(), packet_size);
+      CHECK_AND_ASSERT_THROW_MES(nread == packet_size,
                                  "THP: short read on the data transfer layer");
       if (ctrl::is_continuation(packet[0])) {
         MWARNING("THP: skipping unexpected continuation packet");
@@ -225,15 +229,15 @@ Message read_message(Transport &transport, size_t max_retries) {
       ctrl_byte = packet[0];
       cid = static_cast<uint16_t>((packet[1] << 8) | packet[2]);
       data_length = static_cast<size_t>((packet[3] << 8) | packet[4]);
-      acc.assign(packet + INIT_HEADER_LENGTH, packet + THP_PACKET_SIZE);
+      acc.assign(packet.begin() + INIT_HEADER_LENGTH, packet.end());
       have_init = true;
     }
 
     // Collect continuation packets until the payload is complete.
     bool restart = false;
     while (acc.size() < data_length) {
-      const size_t nread = transport.read_chunk(packet, THP_PACKET_SIZE);
-      CHECK_AND_ASSERT_THROW_MES(nread == THP_PACKET_SIZE,
+      const size_t nread = transport.read_chunk(packet.data(), packet_size);
+      CHECK_AND_ASSERT_THROW_MES(nread == packet_size,
                                  "THP: short read on the data transfer layer");
       if (!ctrl::is_continuation(packet[0])) {
         // A new payload started before this one finished; abandon this one.
@@ -246,7 +250,7 @@ Message read_message(Transport &transport, size_t max_retries) {
         MWARNING("THP: ignoring continuation packet for channel " << cont_cid);
         continue;
       }
-      acc.insert(acc.end(), packet + CONT_HEADER_LENGTH, packet + THP_PACKET_SIZE);
+      acc.insert(acc.end(), packet.begin() + CONT_HEADER_LENGTH, packet.end());
     }
     if (restart) continue;
 
