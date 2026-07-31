@@ -89,18 +89,23 @@ if(DEVICE_TREZOR_READY)
     monero_private_headers(device_trezor
             ${device_private_headers})
 
-    # Bluetooth Low Energy transport. On Windows this uses the Win32 GATT API
-    # (bluetoothleapis.h), which mingw-w64 provides; C++/WinRT is not reachable
-    # from a cross build. Other platforms have no backend yet, so BLE simply
+    # Bluetooth Low Energy transport. On Windows this talks to the WinRT ABI
+    # through the MIDL-generated headers mingw-w64 ships, because WinRT is the
+    # only Windows API that can scan raw BLE advertisements and connect to a
+    # device that the operating system has not bonded with - which is how every
+    # Trezor host discovers these devices. The Win32 GATT API (bluetoothleapis.h)
+    # cannot do either. Other platforms have no backend yet, so BLE simply
     # enumerates no devices there.
     #
     # The definition has to be set before the library is created: monero_add_library
     # compiles the sources into an object library, so target_compile_definitions on
     # the resulting target would never reach the compiler.
     if(WIN32)
-        set(TREZOR_BLE_LIBRARIES bluetoothapis setupapi)
+        # windowsapp/runtimeobject provide the WinRT activation and string APIs;
+        # uuid provides IID_IUnknown.
+        set(TREZOR_BLE_LIBRARIES windowsapp runtimeobject ole32 uuid)
         add_definitions(-DWITH_DEVICE_TREZOR_BLE=1)
-        message(STATUS "Trezor: Bluetooth Low Energy enabled (Win32 GATT)")
+        message(STATUS "Trezor: Bluetooth Low Energy enabled (WinRT)")
     else()
         set(TREZOR_BLE_LIBRARIES)
         message(STATUS "Trezor: Bluetooth Low Energy has no backend on this platform")
@@ -126,7 +131,7 @@ if(DEVICE_TREZOR_READY)
             ${Boost_FILESYSTEM_LIBRARY}
             ${Protobuf_LIBRARY}
             ${TREZOR_LIBUSB_LIBRARIES}
-            # Windows Bluetooth GATT and device enumeration; empty elsewhere.
+            # Windows WinRT runtime for the Bluetooth backend; empty elsewhere.
             ${TREZOR_BLE_LIBRARIES}
             PRIVATE
             ${EXTRA_LIBRARIES})
