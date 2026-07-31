@@ -59,6 +59,8 @@ namespace mthp = hw::trezor::messages::thp;
 namespace
 {
   constexpr uint16_t TEST_CHANNEL_ID = 0x0042;
+  // Overridden per-test to exercise BLE framing (244) as well as USB (64).
+  size_t g_packet_size = 64;
 
   bytes proto_bytes(const google::protobuf::Message &m)
   {
@@ -122,14 +124,14 @@ namespace
     {
       if (ctrl::is_continuation(packet[0]))
       {
-        m_rx.insert(m_rx.end(), packet + CONT_HEADER_LENGTH, packet + THP_PACKET_SIZE);
+        m_rx.insert(m_rx.end(), packet + CONT_HEADER_LENGTH, packet + g_packet_size);
       }
       else
       {
         m_rx_ctrl = packet[0];
         m_rx_cid = static_cast<uint16_t>((packet[1] << 8) | packet[2]);
         m_rx_len = static_cast<size_t>((packet[3] << 8) | packet[4]);
-        m_rx.assign(packet + INIT_HEADER_LENGTH, packet + THP_PACKET_SIZE);
+        m_rx.assign(packet + INIT_HEADER_LENGTH, packet + g_packet_size);
       }
       if (m_rx.size() < m_rx_len) return;
 
@@ -142,7 +144,7 @@ namespace
 
     void pop(uint8_t *out)
     {
-      memcpy(out, m_tx.front().data(), THP_PACKET_SIZE);
+      memcpy(out, m_tx.front().data(), g_packet_size);
       m_tx.pop_front();
     }
 
@@ -151,9 +153,9 @@ namespace
     {
       const bytes payload = msg.to_bytes();
       size_t off = 0;
-      std::vector<uint8_t> pkt(THP_PACKET_SIZE, 0);
+      std::vector<uint8_t> pkt(g_packet_size, 0);
 
-      const size_t first = std::min(payload.size(), THP_PACKET_SIZE);
+      const size_t first = std::min(payload.size(), g_packet_size);
       std::fill(pkt.begin(), pkt.end(), 0);
       memcpy(pkt.data(), payload.data(), first);
       m_tx.push_back(pkt);
@@ -165,7 +167,7 @@ namespace
         pkt[0] = ctrl::CONTINUATION_BIT;
         pkt[1] = static_cast<uint8_t>((msg.cid >> 8) & 0xFF);
         pkt[2] = static_cast<uint8_t>(msg.cid & 0xFF);
-        const size_t n = std::min(payload.size() - off, THP_PACKET_SIZE - CONT_HEADER_LENGTH);
+        const size_t n = std::min(payload.size() - off, g_packet_size - CONT_HEADER_LENGTH);
         memcpy(pkt.data() + CONT_HEADER_LENGTH, payload.data() + off, n);
         m_tx.push_back(pkt);
         off += n;
@@ -546,9 +548,11 @@ namespace
 
     void write_chunk(const void *buff, size_t size) override
     {
-      ASSERT_EQ(THP_PACKET_SIZE, size);
+      ASSERT_EQ(g_packet_size, size);
       device.feed(static_cast<const uint8_t *>(buff));
     }
+
+    size_t packet_size() const override { return g_packet_size; }
 
     size_t read_chunk(void *buff, size_t size) override
     {
@@ -817,6 +821,64 @@ TEST(trezor_thp_protocol, oversized_message_is_rejected_cleanly)
   // rather than silently truncating and corrupting the channel.
   Message msg(ctrl::ENCRYPTED_TRANSPORT, 1, bytes(0x10000, 0x00));
   ASSERT_ANY_THROW(msg.to_bytes());
+}
+
+// Restores the USB packet size however a test exits.
+namespace {
+  struct PacketSizeOverride
+  {
+    explicit PacketSizeOverride(size_t n) { g_packet_size = n; }
+    ~PacketSizeOverride() { g_packet_size = 64; }
+  };
+}
+
+TEST(trezor_thp_protocol, works_over_bluetooth_packet_size)
+{
+  // Bluetooth Low Energy carries THP in 244-byte packets rather than USB's 64.
+  // Framing must follow the transport rather than assume USB, so run the whole
+  // flow - handshake, pairing, session, and payloads spanning the larger packet
+  // boundary - at the BLE size.
+  PacketSizeOverride ble(244);
+
+  LoopbackTransport transport;
+  TempStore store;
+
+  ProtocolThp proto;
+  auto ui = std::make_shared<EchoPairingUI>(transport.device);
+  proto.set_pairing_ui(ui);
+  proto.set_credential_store(std::make_shared<FileCredentialStore>(store.path.string()));
+
+  ASSERT_NO_THROW(proto.session_begin(transport));
+  ASSERT_TRUE(transport.device.created_session);
+  ASSERT_EQ("T3W1", proto.internal_model());
+
+  // Sizes straddling the 244-byte packet boundary, plus a multi-packet payload.
+  for (size_t size : {size_t(1), size_t(238), size_t(239), size_t(240), size_t(241),
+                      size_t(500), size_t(20000)})
+  {
+    messages::common::Failure req;
+    req.set_message(std::string(size, 'b'));
+    ASSERT_NO_THROW(proto.write(transport, req));
+
+    std::shared_ptr<google::protobuf::Message> resp;
+    ASSERT_NO_THROW(proto.read(transport, resp, nullptr));
+    const auto *success = dynamic_cast<messages::common::Success *>(resp.get());
+    ASSERT_TRUE(success != nullptr);
+    ASSERT_GE(success->message().size(), size);
+  }
+}
+
+TEST(trezor_thp_protocol, framing_is_identical_across_packet_sizes)
+{
+  // The transport payload is a property of the message, not of the link, so the
+  // same message must encode identically whatever the packet size - only the
+  // segmentation into packets differs.
+  const Message msg(ctrl::ENCRYPTED_TRANSPORT, 0x1234, bytes(700, 0x5A));
+  const bytes usb_bytes = msg.to_bytes();
+  {
+    PacketSizeOverride ble(244);
+    ASSERT_EQ(usb_bytes, msg.to_bytes());
+  }
 }
 
 TEST(trezor_thp_protocol, probe_detects_thp_device)

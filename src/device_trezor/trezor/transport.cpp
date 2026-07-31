@@ -41,6 +41,7 @@
 #include "common/apply_permutation.h"
 #include "transport.hpp"
 #include "protocol_thp.hpp"
+#include "transport_ble.hpp"
 #include "messages/messages-common.pb.h"
 
 #undef MONERO_DEFAULT_LOG_CATEGORY
@@ -1227,6 +1228,14 @@ namespace trezor{
     } catch (const std::exception & e){
         MERROR("BridgeTransport enumeration failed:" << e.what());
     }
+
+    // Yields nothing unless the host application installed a Bluetooth backend.
+    BleTransport btble;
+    try{
+        btble.enumerate(res);
+    } catch (const std::exception & e){
+        MERROR("BleTransport enumeration failed:" << e.what());
+    }
   }
 
   void sort_transports_by_env(t_transport_vect & res){
@@ -1268,6 +1277,9 @@ namespace trezor{
 
     } else if (boost::starts_with(path, UdpTransport::PATH_PREFIX)){
       return std::make_shared<UdpTransport>(path.substr(strlen(UdpTransport::PATH_PREFIX)));
+
+    } else if (boost::starts_with(path, BleTransport::PATH_PREFIX)){
+      return std::make_shared<BleTransport>(path.substr(strlen(BleTransport::PATH_PREFIX)));
 
     } else {
       throw std::invalid_argument("Unknown Trezor device path: " + path);

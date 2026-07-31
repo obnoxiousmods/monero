@@ -51,6 +51,7 @@ set(trezor_headers
         trezor/thp_curve25519.hpp
         trezor/thp_wire.hpp
         trezor/transport.hpp
+        trezor/transport_ble.hpp
         device_trezor_base.hpp
         device_trezor.hpp
         trezor.hpp
@@ -65,6 +66,7 @@ set(trezor_sources
         trezor/thp_curve25519.cpp
         trezor/thp_wire.cpp
         trezor/transport.cpp
+        trezor/transport_ble.cpp
         device_trezor_base.cpp
         device_trezor.cpp
         ${TREZOR_PROTOB_CPP}
