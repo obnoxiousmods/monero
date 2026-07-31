@@ -233,6 +233,10 @@ private:
   bool m_sync_bit_send = false;
   bool m_sync_bit_receive = false;
 
+  // Set when a data message arrives carrying a piggybacked acknowledgement
+  // instead of a standalone ACK; the next read consumes it.
+  boost::optional<thp::Message> m_pending_message;
+
   // Noise handshake state.
   thp::hash256 m_h{};
   thp::hash256 m_ck{};

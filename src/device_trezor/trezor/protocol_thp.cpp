@@ -238,6 +238,7 @@ void ProtocolThp::reset_channel() {
   m_credential_matched = false;
   m_credential.clear();
   m_prologue.clear();
+  m_pending_message = boost::none;
 }
 
 void ProtocolThp::set_passphrase(const std::string &passphrase, bool on_device) {
@@ -269,11 +270,28 @@ void ProtocolThp::await_ack(Transport &transport, bool expected_seq_bit) {
       throw exc::CommunicationException(std::string("THP: transport error ") +
                                         transport_error_to_string(msg.data[0]));
     }
-    if (!ctrl::is_ack(msg.ctrl_byte)) {
+
+    const bool ack_bit_ok = ctrl::get_ack_bit(msg.ctrl_byte) == expected_seq_bit;
+
+    if (ctrl::is_ack(msg.ctrl_byte)) {
+      if (!msg.data.empty()) {
+        MWARNING("THP: ignoring ACK carrying unexpected data");
+        continue;
+      }
+    } else if (ctrl::is_data(msg.ctrl_byte) && ack_bit_ok) {
+      // We set the ACK bit on our outgoing messages, which newer firmware
+      // reads as permission to piggyback: it may answer with the response
+      // itself rather than a standalone ACK. Keep it for the next read instead
+      // of discarding it, which would strand the exchange.
+      MDEBUG("THP: acknowledgement piggybacked on a data message");
+      m_pending_message = msg;
+      return;
+    } else {
       MWARNING("THP: expected an ACK, got " << msg.to_string());
       continue;
     }
-    if (ctrl::get_ack_bit(msg.ctrl_byte) != expected_seq_bit) {
+
+    if (!ack_bit_ok) {
       MWARNING("THP: ACK with unexpected sequence bit");
       continue;
     }
@@ -300,7 +318,16 @@ void ProtocolThp::send_message(Transport &transport, Message msg) {
 
 Message ProtocolThp::read_message(Transport &transport, bool allow_broadcast) {
   while (true) {
-    Message msg = thp::read_message(transport);
+    Message msg;
+    if (m_pending_message) {
+      // A message that arrived in place of a standalone ACK. Only its ACK bit
+      // was inspected when it was stashed, so it still has to go through the
+      // channel and sequence checks below.
+      msg = *m_pending_message;
+      m_pending_message = boost::none;
+    } else {
+      msg = thp::read_message(transport);
+    }
 
     if (msg.cid != m_channel_id &&
         !(allow_broadcast && msg.cid == BROADCAST_CHANNEL_ID)) {
