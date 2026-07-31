@@ -1419,6 +1419,21 @@ struct WalletManager
 };
 
 
+/**
+ * Absolute path of the Trezor-Host Protocol pairing credential store.
+ *
+ * THP credentials belong to a (host, device) pair rather than to a wallet, so
+ * they live outside the wallet file. Exposed so a front-end can offer to forget
+ * a pairing. Returns an empty string in builds without Trezor support.
+ */
+std::string trezorPairingCredentialsPath();
+
+/**
+ * Delete the stored THP pairing credentials, so the next connection pairs from
+ * scratch. Returns false if the store exists but could not be removed.
+ */
+bool forgetTrezorPairings();
+
 struct WalletManagerFactory
 {
     // logging levels for underlying library

@@ -88,6 +88,9 @@ namespace
     uint8_t session_id_used = 0xFF;
     std::string session_passphrase;
     int session_create_count = 0;
+    int app_messages_seen = 0;
+    size_t largest_request_seen = 0;
+    bool echo_payload_size = true;
     std::vector<uint8_t> session_ids;
     std::vector<std::string> session_passphrases;
     bool saw_end_request = false;
@@ -501,10 +504,17 @@ namespace
         }
 
         default:
-          // Echo unknown application messages back as Success so the transport
-          // round-trip can be exercised.
-          send_app(sid, wire_type::Success, proto_bytes(messages::common::Success()));
+        {
+          // Echo unknown application messages back as a Success whose payload
+          // is the same size, so round-trips of any length can be verified.
+          messages::common::Success s;
+          if (echo_payload_size && !body.empty())
+            s.set_message(std::string(body.size(), 'x'));
+          largest_request_seen = std::max(largest_request_seen, body.size());
+          ++app_messages_seen;
+          send_app(sid, wire_type::Success, proto_bytes(s));
           break;
+        }
       }
     }
 
@@ -737,6 +747,76 @@ TEST(trezor_thp_protocol, reset_session_rederives_with_a_new_passphrase)
   ASSERT_NE(first_session, transport.device.session_ids[1]);
   // Pairing must not have been repeated; the channel survives a session reset.
   ASSERT_EQ(1, transport.device.session_create_count - 1);
+}
+
+TEST(trezor_thp_protocol, sustained_exchange_matches_key_image_sync_shape)
+{
+  // Key image sync walks the wallet's transfers in batches of ten, so a large
+  // wallet drives a long run of request/response pairs over one channel. The
+  // per-direction nonce counters and the alternating bit both have to stay in
+  // step for the whole run - a single slip decrypts to garbage.
+  LoopbackTransport transport;
+  TempStore store;
+
+  ProtocolThp proto;
+  proto.set_pairing_ui(std::make_shared<EchoPairingUI>(transport.device));
+  proto.set_credential_store(std::make_shared<FileCredentialStore>(store.path.string()));
+  ASSERT_NO_THROW(proto.session_begin(transport));
+
+  // 200 batches is a wallet with ~2000 transfers.
+  for (int i = 0; i < 200; ++i)
+  {
+    messages::common::Failure req;
+    req.set_message(std::string(64 + (i % 37), 'a'));
+    ASSERT_NO_THROW(proto.write(transport, req));
+
+    std::shared_ptr<google::protobuf::Message> resp;
+    messages::MessageType type;
+    ASSERT_NO_THROW(proto.read(transport, resp, &type));
+    ASSERT_EQ(wire_type::Success, static_cast<uint16_t>(type));
+  }
+  ASSERT_EQ(200, transport.device.app_messages_seen);
+}
+
+TEST(trezor_thp_protocol, large_messages_fragment_and_reassemble)
+{
+  // Transaction signing sends inputs carrying ring members, which are far
+  // larger than the 64-byte USB packet and must fragment across continuation
+  // packets in both directions.
+  LoopbackTransport transport;
+  TempStore store;
+
+  ProtocolThp proto;
+  proto.set_pairing_ui(std::make_shared<EchoPairingUI>(transport.device));
+  proto.set_credential_store(std::make_shared<FileCredentialStore>(store.path.string()));
+  ASSERT_NO_THROW(proto.session_begin(transport));
+
+  for (size_t size : {size_t(1), size_t(58), size_t(59), size_t(60), size_t(61),
+                      size_t(1024), size_t(8192), size_t(40000)})
+  {
+    messages::common::Failure req;
+    req.set_message(std::string(size, 'z'));
+    ASSERT_NO_THROW(proto.write(transport, req));
+
+    std::shared_ptr<google::protobuf::Message> resp;
+    ASSERT_NO_THROW(proto.read(transport, resp, nullptr));
+    const auto *success = dynamic_cast<messages::common::Success *>(resp.get());
+    ASSERT_TRUE(success != nullptr);
+    // The device echoed a payload the same size as the request body, so an
+    // intact round trip means both directions fragmented and reassembled.
+    ASSERT_GE(success->message().size(), size);
+  }
+  ASSERT_GE(transport.device.largest_request_seen, size_t(40000));
+}
+
+TEST(trezor_thp_protocol, oversized_message_is_rejected_cleanly)
+{
+  // THP's length field is 16 bits, so a transport payload cannot exceed 64 KiB.
+  // Monero batches key image sync and sends transaction inputs individually, so
+  // this is not reachable in practice - but it must fail with a clear error
+  // rather than silently truncating and corrupting the channel.
+  Message msg(ctrl::ENCRYPTED_TRANSPORT, 1, bytes(0x10000, 0x00));
+  ASSERT_ANY_THROW(msg.to_bytes());
 }
 
 TEST(trezor_thp_protocol, probe_detects_thp_device)

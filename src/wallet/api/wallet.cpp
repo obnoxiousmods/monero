@@ -48,6 +48,10 @@
 
 #include <boost/filesystem.hpp>
 
+#ifdef DEVICE_TREZOR_READY
+#include "device_trezor/trezor/protocol_thp.hpp"
+#endif
+
 using namespace std;
 using namespace cryptonote;
 
@@ -3118,6 +3122,33 @@ bool WalletImpl::setRingDatabase(const std::string &path) {
 
 tools::wallet2* WalletImpl::getWallet() {
     return m_wallet.get();
+}
+
+std::string trezorPairingCredentialsPath()
+{
+#ifdef DEVICE_TREZOR_READY
+    return hw::trezor::thp::FileCredentialStore::default_path();
+#else
+    return std::string();
+#endif
+}
+
+bool forgetTrezorPairings()
+{
+#ifdef DEVICE_TREZOR_READY
+    const std::string path = hw::trezor::thp::FileCredentialStore::default_path();
+    if (path.empty())
+        return true;
+
+    boost::system::error_code ec;
+    if (!boost::filesystem::exists(path, ec))
+        return true;  // nothing paired; nothing to forget
+
+    boost::filesystem::remove(path, ec);
+    return !ec;
+#else
+    return true;
+#endif
 }
 
 } // namespace
