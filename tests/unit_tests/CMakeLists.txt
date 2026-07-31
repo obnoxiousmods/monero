@@ -88,6 +88,7 @@ set(unit_tests_sources
   test_protocol_pack.cpp
   threadpool.cpp
   trezor_thp.cpp
+  trezor_thp_protocol.cpp
   tx_proof.cpp
   hardfork.cpp
   unbound.cpp
