@@ -81,6 +81,13 @@ namespace hw {
         virtual void on_error(const std::string &message, unsigned int error_code = 0) {}
         virtual boost::optional<epee::wipeable_string> on_pin_request() { return boost::none; }
         virtual boost::optional<epee::wipeable_string> on_passphrase_request(bool & on_device) { on_device = true; return boost::none; }
+        /**
+         * Called when a device using the Trezor-Host Protocol displays a
+         * six-digit pairing code that the user has to copy into the host.
+         * Returning boost::none aborts pairing. Devices speaking the legacy
+         * protocol never invoke this.
+         */
+        virtual boost::optional<epee::wipeable_string> on_pairing_code_request() { return boost::none; }
         virtual void on_progress(const device_progress& event) {}
         virtual ~i_device_callback() = default;
     };

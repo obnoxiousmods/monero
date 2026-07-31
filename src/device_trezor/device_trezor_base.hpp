@@ -42,6 +42,10 @@
 #include "cryptonote_config.h"
 #include "trezor.hpp"
 
+#ifdef WITH_DEVICE_TREZOR
+#include "trezor/protocol_thp.hpp"
+#endif
+
 #ifdef WITH_TREZOR_DEBUGGING
 #include "trezor/debug_link.hpp"
 #endif
@@ -78,6 +82,23 @@ namespace trezor {
     };
 
 #endif
+
+  /**
+   * Bridges the THP pairing interaction to the wallet's device callback.
+   *
+   * The Trezor-Host Protocol needs the user to copy a six-digit code from the
+   * device screen into the host, which has no equivalent in the legacy
+   * protocol and therefore no existing callback.
+   */
+  class trezor_pairing_ui : public trezor::thp::PairingUI {
+    public:
+      explicit trezor_pairing_ui(device_trezor_base * device): m_device(device) {}
+      boost::optional<std::string> on_pairing_code_request() override;
+      std::string host_name() const override;
+      std::string app_name() const override;
+    private:
+      device_trezor_base * m_device;
+  };
 
   /**
    * TREZOR device template with basic functions
@@ -280,6 +301,12 @@ namespace trezor {
     virtual void set_passphrase(const epee::wipeable_string & passphrase) override {
       m_passphrase = passphrase;
     }
+
+    /**
+     * Ask the wallet UI for the THP pairing code displayed on the device.
+     * Returns boost::none when there is no callback or the user cancelled.
+     */
+    boost::optional<epee::wipeable_string> on_pairing_code_request();
 
     /* ======================================================================= */
     /*                              SETUP/TEARDOWN                             */

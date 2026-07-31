@@ -142,6 +142,11 @@ namespace trezor {
           return false;
         }
 
+        // Devices speaking the Trezor-Host Protocol need a way to ask the user
+        // for the pairing code shown on their screen. This is a no-op for the
+        // models that use the legacy protocol.
+        m_transport->set_pairing_ui(std::make_shared<trezor_pairing_ui>(this));
+
         m_transport->open();
 
 #ifdef WITH_TREZOR_DEBUGGING
@@ -449,6 +454,33 @@ namespace trezor {
     void device_trezor_base::on_button_pressed()
     {
       TREZOR_CALLBACK(on_button_pressed);
+    }
+
+    boost::optional<epee::wipeable_string> device_trezor_base::on_pairing_code_request()
+    {
+      MDEBUG("on_pairing_code_request");
+      boost::optional<epee::wipeable_string> code;
+      TREZOR_CALLBACK_GET(code, on_pairing_code_request);
+      return code;
+    }
+
+    boost::optional<std::string> trezor_pairing_ui::on_pairing_code_request()
+    {
+      if (!m_device) return boost::none;
+      const auto code = m_device->on_pairing_code_request();
+      if (!code) return boost::none;
+      return std::string(code->data(), code->size());
+    }
+
+    std::string trezor_pairing_ui::host_name() const
+    {
+      // Shown on the Trezor screen while the user approves pairing.
+      return "Feather";
+    }
+
+    std::string trezor_pairing_ui::app_name() const
+    {
+      return "Monero";
     }
 
     void device_trezor_base::on_pin_request(GenericMessage & resp, const messages::common::PinMatrixRequest * msg)
