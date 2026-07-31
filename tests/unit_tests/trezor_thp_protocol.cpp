@@ -89,6 +89,9 @@ namespace
     std::string session_passphrase;
     bool saw_end_request = false;
     bool tag_rejected = false;
+    bool saw_button_ack = false;
+    /** Interleave a ButtonRequest before the end-of-handshake response. */
+    bool button_request_before_end = true;
 
     key256 static_priv{}, static_pub{};
 
@@ -422,7 +425,35 @@ namespace
 
         case wire_type::ThpEndRequest:
           saw_end_request = true;
-          send_app(sid, wire_type::ThpEndResponse, proto_bytes(mthp::ThpEndResponse()));
+          if (button_request_before_end)
+          {
+            // Real devices interleave ButtonRequests into any phase when they
+            // want the user to confirm something; the host must acknowledge and
+            // keep reading rather than treating it as the wrong reply.
+            m_pending_end_session = sid;
+            messages::common::ButtonRequest br;
+            send_app(sid, wire_type::ButtonRequest, proto_bytes(br));
+          }
+          else
+          {
+            send_app(sid, wire_type::ThpEndResponse, proto_bytes(mthp::ThpEndResponse()));
+          }
+          break;
+
+        case wire_type::ButtonAck:
+          saw_button_ack = true;
+          if (m_pending_end_session >= 0)
+          {
+            const uint8_t s = static_cast<uint8_t>(m_pending_end_session);
+            m_pending_end_session = -1;
+            send_app(s, wire_type::ThpEndResponse, proto_bytes(mthp::ThpEndResponse()));
+          }
+          else
+          {
+            // No confirmation outstanding: treat it like any other application
+            // message and echo, so it can be used to exercise the transport.
+            send_app(sid, wire_type::Success, proto_bytes(messages::common::Success()));
+          }
           break;
 
         case wire_type::ThpCreateNewSession:
@@ -457,6 +488,7 @@ namespace
     bytes m_secret, m_challenge, m_host_static_pub;
     bool m_paired = false;
     bool m_tx_seq = false;
+    int m_pending_end_session = -1;
   };
 
   /** Transport that wires ProtocolThp directly to the simulated device. */
@@ -529,6 +561,9 @@ TEST(trezor_thp_protocol, full_pairing_handshake_and_session)
   ASSERT_TRUE(transport.device.saw_end_request);
   ASSERT_TRUE(transport.device.created_session);
   ASSERT_EQ("T3W1", proto.internal_model());
+  // The device interleaved a ButtonRequest before the end-of-handshake
+  // response; the host must have acknowledged it rather than giving up.
+  ASSERT_TRUE(transport.device.saw_button_ack);
 
   // The credential was persisted for next time.
   FileCredentialStore reread(store.path.string());

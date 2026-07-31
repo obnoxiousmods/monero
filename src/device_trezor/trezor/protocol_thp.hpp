@@ -220,6 +220,19 @@ private:
   void read_app(Transport &transport, uint8_t &session_id, uint16_t &msg_type,
                 thp::bytes &payload);
 
+  /**
+   * Read an application message, expecting a particular type.
+   *
+   * Any phase of the connection can be interrupted by a ButtonRequest when the
+   * device wants the user to confirm something; those are acknowledged and the
+   * read continues. A Failure is turned into an exception carrying the device's
+   * own message, and an unexpected type reports what actually arrived.
+   *
+   * `what` names the step for the error message, e.g. "ending the handshake".
+   */
+  thp::bytes read_app_expect(Transport &transport, uint8_t session_id,
+                             uint16_t expected_type, const char *what);
+
   thp::bytes noise_encrypt(const thp::bytes &plaintext);
   thp::bytes noise_decrypt(const thp::bytes &ciphertext);
 

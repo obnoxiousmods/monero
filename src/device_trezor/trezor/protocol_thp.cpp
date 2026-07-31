@@ -684,6 +684,37 @@ void ProtocolThp::read_app(Transport &transport, uint8_t &session_id,
   }
 }
 
+bytes ProtocolThp::read_app_expect(Transport &transport, uint8_t session_id,
+                                   uint16_t expected_type, const char *what) {
+  uint8_t sid = 0;
+  uint16_t type = 0;
+  bytes payload;
+
+  while (true) {
+    read_app(transport, sid, type, payload);
+
+    if (type == wire_type::ButtonRequest) {
+      // The device is waiting on the user; acknowledge and keep reading. This
+      // can happen in any phase, so it is handled here rather than per call site.
+      messages::common::ButtonAck ack;
+      write_app(transport, sid, wire_type::ButtonAck, serialize_proto(ack));
+      continue;
+    }
+
+    if (type == wire_type::Failure && expected_type != wire_type::Failure) {
+      const auto f = parse_proto<messages::common::Failure>(payload);
+      throw exc::CommunicationException(std::string("THP: the device reported a failure while ") +
+                                        what + ": " + f.message());
+    }
+
+    if (type == expected_type) return payload;
+
+    throw exc::CommunicationException(
+        std::string("THP: unexpected message while ") + what +
+        " (wire type " + std::to_string(type) + ")");
+  }
+}
+
 // --- pairing ---------------------------------------------------------------
 
 void ProtocolThp::do_pairing(Transport &transport) {
@@ -697,24 +728,8 @@ void ProtocolThp::do_pairing(Transport &transport) {
   req.set_host_name(m_pairing_ui->host_name());
   req.set_app_name(m_pairing_ui->app_name());
   write_app(transport, 0, wire_type::ThpPairingRequest, serialize_proto(req));
-
-  uint8_t sid = 0;
-  uint16_t type = 0;
-  bytes payload;
-  while (true) {
-    read_app(transport, sid, type, payload);
-    if (type == wire_type::ButtonRequest) {
-      messages::common::ButtonAck ack;
-      write_app(transport, 0, wire_type::ButtonAck, serialize_proto(ack));
-      continue;
-    }
-    if (type == wire_type::ThpPairingRequestApproved) break;
-    if (type == wire_type::Failure) {
-      const auto f = parse_proto<messages::common::Failure>(payload);
-      throw exc::CommunicationException("THP: pairing rejected: " + f.message());
-    }
-    throw exc::CommunicationException("THP: unexpected message while pairing");
-  }
+  read_app_expect(transport, 0, wire_type::ThpPairingRequestApproved,
+                  "waiting for pairing to be approved on the device");
 
   const bool code_entry_supported =
       std::find(m_pairing_methods.begin(), m_pairing_methods.end(),
@@ -728,18 +743,13 @@ void ProtocolThp::do_pairing(Transport &transport) {
 }
 
 void ProtocolThp::code_entry_pairing(Transport &transport) {
-  uint8_t sid = 0;
-  uint16_t type = 0;
-  bytes payload;
-
   // Select CodeEntry; the device answers with its commitment.
   mthp::ThpSelectMethod sel;
   sel.set_selected_pairing_method(mthp::CodeEntry);
   write_app(transport, 0, wire_type::ThpSelectMethod, serialize_proto(sel));
 
-  read_app(transport, sid, type, payload);
-  CHECK_AND_ASSERT_THROW_MES(type == wire_type::ThpCodeEntryCommitment,
-                             "THP: expected a CodeEntry commitment");
+  bytes payload = read_app_expect(transport, 0, wire_type::ThpCodeEntryCommitment,
+                                  "selecting the CodeEntry pairing method");
   const auto commitment_msg = parse_proto<mthp::ThpCodeEntryCommitment>(payload);
   const std::string commitment = commitment_msg.commitment();
 
@@ -750,9 +760,8 @@ void ProtocolThp::code_entry_pairing(Transport &transport) {
   chal.set_challenge(challenge.data(), challenge.size());
   write_app(transport, 0, wire_type::ThpCodeEntryChallenge, serialize_proto(chal));
 
-  read_app(transport, sid, type, payload);
-  CHECK_AND_ASSERT_THROW_MES(type == wire_type::ThpCodeEntryCpaceTrezor,
-                             "THP: expected the Trezor CPace public key");
+  payload = read_app_expect(transport, 0, wire_type::ThpCodeEntryCpaceTrezor,
+                            "waiting for the device to display the pairing code");
   const auto cpace_msg = parse_proto<mthp::ThpCodeEntryCpaceTrezor>(payload);
   const std::string trezor_cpace_pub = cpace_msg.cpace_trezor_public_key();
   CHECK_AND_ASSERT_THROW_MES(trezor_cpace_pub.size() == 32,
@@ -787,13 +796,9 @@ void ProtocolThp::code_entry_pairing(Transport &transport) {
   host_tag.set_tag(tag.data(), tag.size());
   write_app(transport, 0, wire_type::ThpCodeEntryCpaceHostTag, serialize_proto(host_tag));
 
-  read_app(transport, sid, type, payload);
-  if (type == wire_type::Failure) {
-    const auto f = parse_proto<messages::common::Failure>(payload);
-    throw exc::CommunicationException("THP: pairing failed: " + f.message());
-  }
-  CHECK_AND_ASSERT_THROW_MES(type == wire_type::ThpCodeEntrySecret,
-                             "THP: expected the CodeEntry secret");
+  // A Failure here means the device rejected our tag, i.e. the code was wrong.
+  payload = read_app_expect(transport, 0, wire_type::ThpCodeEntrySecret,
+                            "verifying the pairing code");
   const auto secret_msg = parse_proto<mthp::ThpCodeEntrySecret>(payload);
   const std::string secret = secret_msg.secret();
 
@@ -837,27 +842,16 @@ void ProtocolThp::request_credential(Transport &transport) {
     req.set_credential(m_credential.data(), m_credential.size());
   write_app(transport, 0, wire_type::ThpCredentialRequest, serialize_proto(req));
 
-  uint8_t sid = 0;
-  uint16_t type = 0;
   bytes payload;
-  while (true) {
-    read_app(transport, sid, type, payload);
-    if (type == wire_type::ButtonRequest) {
-      messages::common::ButtonAck ack;
-      write_app(transport, 0, wire_type::ButtonAck, serialize_proto(ack));
-      continue;
-    }
-    break;
-  }
-
-  if (type == wire_type::Failure) {
-    // Not fatal: the channel still works, the user will just have to pair again.
-    const auto f = parse_proto<messages::common::Failure>(payload);
-    MWARNING("THP: the device declined to issue a pairing credential: " << f.message());
+  try {
+    payload = read_app_expect(transport, 0, wire_type::ThpCredentialResponse,
+                              "requesting a pairing credential");
+  } catch (const std::exception &e) {
+    // Not fatal: the channel still works, the user will just have to pair again
+    // next time rather than reconnecting silently.
+    MWARNING("THP: the device did not issue a pairing credential: " << e.what());
     return;
   }
-  CHECK_AND_ASSERT_THROW_MES(type == wire_type::ThpCredentialResponse,
-                             "THP: expected a credential response");
 
   const auto resp = parse_proto<mthp::ThpCredentialResponse>(payload);
   CHECK_AND_ASSERT_THROW_MES(resp.trezor_static_public_key().size() == 32,
@@ -879,13 +873,7 @@ void ProtocolThp::request_credential(Transport &transport) {
 void ProtocolThp::end_handshake(Transport &transport) {
   mthp::ThpEndRequest req;
   write_app(transport, 0, wire_type::ThpEndRequest, serialize_proto(req));
-
-  uint8_t sid = 0;
-  uint16_t type = 0;
-  bytes payload;
-  read_app(transport, sid, type, payload);
-  CHECK_AND_ASSERT_THROW_MES(type == wire_type::ThpEndResponse,
-                             "THP: expected the end-of-handshake response");
+  read_app_expect(transport, 0, wire_type::ThpEndResponse, "ending the handshake");
   m_channel_open = true;
 }
 
@@ -916,26 +904,7 @@ void ProtocolThp::create_session(Transport &transport) {
   m_session_id = (m_passphrase || m_passphrase_on_device) ? 1 : 0;
 
   write_app(transport, m_session_id, wire_type::ThpCreateNewSession, serialize_proto(req));
-
-  uint8_t sid = 0;
-  uint16_t type = 0;
-  bytes payload;
-  while (true) {
-    read_app(transport, sid, type, payload);
-    if (type == wire_type::ButtonRequest) {
-      messages::common::ButtonAck ack;
-      write_app(transport, m_session_id, wire_type::ButtonAck, serialize_proto(ack));
-      continue;
-    }
-    break;
-  }
-
-  if (type == wire_type::Failure) {
-    const auto f = parse_proto<messages::common::Failure>(payload);
-    throw exc::CommunicationException("THP: could not create a session: " + f.message());
-  }
-  CHECK_AND_ASSERT_THROW_MES(type == wire_type::Success,
-                             "THP: unexpected response to session creation");
+  read_app_expect(transport, m_session_id, wire_type::Success, "creating a session");
   m_session_created = true;
   MDEBUG("THP: created session " << static_cast<int>(m_session_id));
 }
