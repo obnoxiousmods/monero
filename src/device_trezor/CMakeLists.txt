@@ -67,6 +67,7 @@ set(trezor_sources
         trezor/thp_wire.cpp
         trezor/transport.cpp
         trezor/transport_ble.cpp
+        trezor/transport_ble_win.cpp
         device_trezor_base.cpp
         device_trezor.cpp
         ${TREZOR_PROTOB_CPP}
@@ -88,6 +89,23 @@ if(DEVICE_TREZOR_READY)
     monero_private_headers(device_trezor
             ${device_private_headers})
 
+    # Bluetooth Low Energy transport. On Windows this uses the Win32 GATT API
+    # (bluetoothleapis.h), which mingw-w64 provides; C++/WinRT is not reachable
+    # from a cross build. Other platforms have no backend yet, so BLE simply
+    # enumerates no devices there.
+    #
+    # The definition has to be set before the library is created: monero_add_library
+    # compiles the sources into an object library, so target_compile_definitions on
+    # the resulting target would never reach the compiler.
+    if(WIN32)
+        set(TREZOR_BLE_LIBRARIES bluetoothapis setupapi)
+        add_definitions(-DWITH_DEVICE_TREZOR_BLE=1)
+        message(STATUS "Trezor: Bluetooth Low Energy enabled (Win32 GATT)")
+    else()
+        set(TREZOR_BLE_LIBRARIES)
+        message(STATUS "Trezor: Bluetooth Low Energy has no backend on this platform")
+    endif()
+
     monero_add_library(device_trezor
             ${trezor_sources}
             ${trezor_headers}
@@ -108,6 +126,8 @@ if(DEVICE_TREZOR_READY)
             ${Boost_FILESYSTEM_LIBRARY}
             ${Protobuf_LIBRARY}
             ${TREZOR_LIBUSB_LIBRARIES}
+            # Windows Bluetooth GATT and device enumeration; empty elsewhere.
+            ${TREZOR_BLE_LIBRARIES}
             PRIVATE
             ${EXTRA_LIBRARIES})
 

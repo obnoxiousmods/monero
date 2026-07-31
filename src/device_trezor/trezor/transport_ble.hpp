@@ -116,6 +116,14 @@ void set_backend_factory(std::function<std::shared_ptr<BleBackend>()> factory);
 /** True when a backend factory has been installed. */
 bool has_backend();
 
+/**
+ * Install the backend for the platform this was built for, if there is one.
+ *
+ * Called once during start-up. On builds and platforms without Bluetooth
+ * support this does nothing, and BLE enumeration then yields no devices.
+ */
+void install_default_backend();
+
 } // namespace ble
 
 /**

@@ -100,8 +100,14 @@ std::string BleTransport::get_path() const {
 }
 
 void BleTransport::enumerate(t_transport_vect &res) {
+  // Install the platform backend on first use rather than requiring the host
+  // application to call it; on platforms without one this is a no-op and
+  // enumeration below simply finds nothing.
   if (!ble::has_backend()) {
-    MDEBUG("BLE: no backend installed, skipping enumeration");
+    ble::install_default_backend();
+  }
+  if (!ble::has_backend()) {
+    MDEBUG("BLE: no Bluetooth backend on this platform, skipping enumeration");
     return;
   }
 
