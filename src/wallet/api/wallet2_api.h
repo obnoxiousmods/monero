@@ -303,6 +303,15 @@ struct WalletListener
     }
 
     /**
+     * @brief called by a device using the Trezor-Host Protocol when the user
+     * must copy the six-digit pairing code shown on the device into the host.
+     * Returning an empty optional aborts pairing.
+     */
+    virtual std::optional<std::string> onDevicePairingCodeRequest() {
+        return std::optional<std::string>();
+    }
+
+    /**
      * @brief Signalizes device operation progress
      */
     virtual void onDeviceProgress(const DeviceProgress & event) { (void)event; };

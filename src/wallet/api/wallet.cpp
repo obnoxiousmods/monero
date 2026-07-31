@@ -318,6 +318,17 @@ struct Wallet2CallbackImpl : public tools::i_wallet2_callback
       return boost::none;
     }
 
+    virtual boost::optional<epee::wipeable_string> on_pairing_code_request()
+    {
+      if (m_listener) {
+        auto code = m_listener->onDevicePairingCodeRequest();
+        if (code) {
+          return boost::make_optional(epee::wipeable_string((*code).data(), (*code).size()));
+        }
+      }
+      return boost::none;
+    }
+
     virtual void on_device_progress(const hw::device_progress & event)
     {
       if (m_listener) {
