@@ -114,7 +114,12 @@ namespace hw {
 namespace trezor {
 namespace ble {
 
-namespace {
+// Not an anonymous namespace: the hand-declared COM interfaces below are
+// abstract, and giving them internal linkage lets the compiler conclude it can
+// see every implementation. Finding none, it devirtualises calls through them
+// into something that crashes the moment the first one is made. A named
+// namespace keeps them private to this file without inviting that.
+namespace winrt_backend {
 
 namespace wf = ABI::Windows::Foundation;
 namespace wfc = ABI::Windows::Foundation::Collections;
@@ -266,9 +271,26 @@ struct IDeviceInformationPairing : public IInspectable {
       int minProtectionLevel, IAsyncOperationDevicePairingResult **result) = 0;
 };
 
+struct IDeviceUnpairingResult : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_Status(int *status) = 0;
+};
+
+struct IAsyncOperationDeviceUnpairingResult : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE put_Completed(void *handler) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_Completed(void **handler) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetResults(IDeviceUnpairingResult **result) = 0;
+};
+
 struct IDeviceInformationPairing2 : public IInspectable {
   virtual HRESULT STDMETHODCALLTYPE get_ProtectionLevel(int *value) = 0;
   virtual HRESULT STDMETHODCALLTYPE get_Custom(IDeviceInformationCustomPairing **value) = 0;
+  // Declared so UnpairAsync lands at the right vtable offset, not because we
+  // call it.
+  virtual HRESULT STDMETHODCALLTYPE PairWithProtectionLevelAndSettingsAsync(
+      int minProtectionLevel, void *settings,
+      IAsyncOperationDevicePairingResult **result) = 0;
+  virtual HRESULT STDMETHODCALLTYPE UnpairAsync(
+      IAsyncOperationDeviceUnpairingResult **result) = 0;
 };
 
 // The Pairing property lives here rather than on IDeviceInformation, and
@@ -798,7 +820,12 @@ public:
     // This bounds the cost but does not eliminate it. Scanning belongs behind an
     // explicit "look for Bluetooth devices" action in the UI; until that exists,
     // this keeps the delay tolerable.
-    {
+    // When the user has explicitly asked for Bluetooth, neither the short scan
+    // nor the cache is appropriate: the device only advertises while in pairing
+    // mode, can take tens of seconds to be heard, and a cached "nothing" would
+    // hide it completely.
+    const bool active = active_search();
+    if (!active) {
       std::lock_guard<std::mutex> lock(s_cache_mutex);
       const auto now = std::chrono::steady_clock::now();
       if (s_cache_valid && now - s_cache_time < std::chrono::seconds(cache_ttl_locked())) {
@@ -806,6 +833,7 @@ public:
         return s_cache;
       }
     }
+    const unsigned scan_ms = active ? ACTIVE_SCAN_TIMEOUT_MS : SCAN_TIMEOUT_MS;
 
     ComPtr<IActivationFactory> factory;
     HRESULT hr = get_activation_factory(
@@ -840,7 +868,7 @@ public:
 
     std::vector<BleDeviceInfo> devices;
     if (SUCCEEDED(watcher->Start())) {
-      devices = collector->wait_for_devices(SCAN_TIMEOUT_MS);
+      devices = collector->wait_for_devices(scan_ms);
       watcher->Stop();
     } else {
       MWARNING("BLE: advertisement scan could not be started");
@@ -949,6 +977,18 @@ public:
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr) && m_device,
                                "BLE: device " << address << " is not reachable");
 
+
+    // Hold the connection open before anything else touches GATT.
+    //
+    // Without a session claiming the link, Windows opens a connection only for
+    // the duration of each GATT call and drops it in between. The Trezor sees
+    // that as an aborted connection and leaves pairing mode, which looks from
+    // the outside like pairing failing instantly. The Trezor's own client has an
+    // explicit connect step for the same reason; on WinRT the equivalent is a
+    // GattSession with MaintainConnection set, established up front rather than
+    // after discovery.
+    open_session();
+
     ComPtr<IBluetoothLEDevice3> device3;
     hr = m_device.as(kIidBluetoothLEDevice3, device3);
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr) && device3,
@@ -968,9 +1008,28 @@ public:
 
     wdg::GattCommunicationStatus status = wdg::GattCommunicationStatus_Unreachable;
     svc_result->get_Status(&status);
-    CHECK_AND_ASSERT_THROW_MES(status == wdg::GattCommunicationStatus_Success,
-                               "BLE: could not read services from the device ("
-                                   << describe_status(status) << ")");
+    if (status != wdg::GattCommunicationStatus_Success) {
+      // A Trezor generates a fresh identity every time it is put into Bluetooth
+      // pairing mode - the advertised name suffix changes with it. Windows,
+      // meanwhile, keeps the bond from the previous identity and will try to
+      // reuse it, so the link fails during encryption setup and discovery comes
+      // back unreachable within moments of connecting.
+      //
+      // The Trezor's own client never unpairs, but it targets platforms where
+      // the system resolves this itself. On Windows the dead bond has to be
+      // removed explicitly or every subsequent attempt fails the same way. The
+      // retry above then pairs afresh.
+      if (forget_stale_bond()) {
+        CHECK_AND_ASSERT_THROW_MES(false,
+                                   "BLE: the saved Bluetooth pairing no longer matches the "
+                                   "device, which happens whenever it re-enters pairing "
+                                   "mode. It has been removed; pairing again");
+      }
+      CHECK_AND_ASSERT_THROW_MES(false, "BLE: could not read services from the device ("
+                                            << describe_status(status)
+                                            << "). Make sure the device is awake and in "
+                                               "Bluetooth pairing mode.");
+    }
 
     ComPtr<wfc::IVectorView<wdg::GattDeviceService *>> services;
     svc_result->get_Services(services.put());
@@ -990,7 +1049,6 @@ public:
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr) && m_rx3, "BLE: unsupported RX characteristic");
 
     configure_session();
-    ensure_paired();
     subscribe();
   }
 
@@ -1027,11 +1085,12 @@ public:
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr) && buffer,
                                "BLE: could not create a write buffer");
 
-    // The Trezor RX characteristic is write-without-response, which matches the
-    // fire-and-forget framing THP expects.
+    // Write *with* response. The Trezor's own client does the same
+    // (universal_ble write with withoutResponse: false); an unacknowledged write
+    // is not what the device's characteristic expects and is rejected.
     ComPtr<wf::IAsyncOperation<wdg::GattWriteResult *>> op;
     hr = m_rx3->WriteValueWithResultAndOptionAsync(
-        buffer.get(), wdg::GattWriteOption_WriteWithoutResponse, op.put());
+        buffer.get(), wdg::GattWriteOption_WriteWithResponse, op.put());
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr) && SUCCEEDED(await_op(op, WRITE_TIMEOUT_MS)),
                                "BLE: writing to the device failed");
 
@@ -1088,6 +1147,8 @@ private:
   // peripheral advertising at a typical 100-1000ms interval to be heard. The
   // scan returns early as soon as a Trezor answers, so this is a worst case.
   static constexpr unsigned SCAN_TIMEOUT_MS = 2500;
+  // A Trezor in pairing mode can take tens of seconds to be heard.
+  static constexpr unsigned ACTIVE_SCAN_TIMEOUT_MS = 45000;
   static constexpr unsigned WRITE_TIMEOUT_MS = 10000;
   static constexpr unsigned CACHE_TTL_S = 10;
   // Pairing waits on a person reading a code off the device screen.
@@ -1158,18 +1219,27 @@ private:
    */
   void configure_session() {
     m_packet_size = BLE_PACKET_SIZE;
-    if (FAILED(m_service3->get_Session(m_session.put())) || !m_session) {
-      MDEBUG("BLE: no GATT session available, assuming " << m_packet_size << " byte packets");
-      return;
+    // m_session is the one opened up front, which is holding the link open.
+    // Reading the service's session into it would drop that reference and undo
+    // the whole point, so only fall back to it when there is nothing to lose.
+    if (!m_session) {
+      if (FAILED(m_service3->get_Session(m_session.put())) || !m_session) {
+        MDEBUG("BLE: no GATT session available, assuming " << m_packet_size
+                                                           << " byte packets");
+        return;
+      }
+      m_session->put_MaintainConnection(true);
     }
-    m_session->put_MaintainConnection(true);
 
+    // The packet size stays at the protocol's fixed 244 rather than being
+    // derived from the negotiated MTU. The Trezor's own client packs to 244
+    // unconditionally, and the framing layer needs both ends to agree on one
+    // number - deriving it from whatever the MTU happened to settle at makes
+    // the host disagree with firmware that never consulted the MTU at all.
     UINT16 mtu = 0;
-    if (SUCCEEDED(m_session->get_MaxPduSize(&mtu)) && mtu > 3) {
-      // Three bytes of the ATT PDU are opcode and handle; the rest is payload.
-      // The firmware sizes its packets the same way, so the two agree.
-      m_packet_size = std::min<size_t>(BLE_PACKET_SIZE, (size_t)mtu - 3);
-      MDEBUG("BLE: negotiated ATT MTU " << mtu << ", packet size " << m_packet_size);
+    if (SUCCEEDED(m_session->get_MaxPduSize(&mtu))) {
+      MDEBUG("BLE: negotiated ATT MTU " << mtu << ", using fixed packet size "
+                                        << m_packet_size);
     }
   }
 
@@ -1206,33 +1276,65 @@ private:
    * not raise it. The device asks for ConfirmPinMatch and shows a six digit code
    * that the user confirms on the device itself.
    */
-  // Kept out of line: this is a distinct, user-visible phase of connecting, and
-  // having it as a real frame makes both crash reports and log traces legible.
-  __attribute__((noinline)) void ensure_paired() {
-    ComPtr<wde::IDeviceInformation> devinfo;
+  /** Resolve the pairing object for the currently connected device. */
+  bool get_pairing(ComPtr<IDeviceInformationPairing> &pairing) {
     HStr devid;
-    m_device->get_DeviceId(devid.put());
+    if (!m_device || FAILED(m_device->get_DeviceId(devid.put()))) return false;
 
     ComPtr<wde::IDeviceInformationStatics> di_statics;
     if (FAILED(get_activation_factory(L"Windows.Devices.Enumeration.DeviceInformation",
                                       __uuidof(wde::IDeviceInformationStatics),
                                       di_statics))) {
-      MWARNING("BLE: device enumeration unavailable, skipping pairing");
-      return;
+      return false;
     }
     ComPtr<wf::IAsyncOperation<wde::DeviceInformation *>> diop;
+    ComPtr<wde::IDeviceInformation> devinfo;
     if (FAILED(di_statics->CreateFromIdAsync(devid.get(), diop.put())) ||
         FAILED(await_op(diop, 15000)) || FAILED(diop->GetResults(devinfo.put())) ||
         !devinfo) {
-      MWARNING("BLE: could not read device information, skipping pairing");
-      return;
+      return false;
     }
 
     ComPtr<IDeviceInformation2> devinfo2;
-    ComPtr<IDeviceInformationPairing> pairing;
     if (FAILED(devinfo.as(kIidDeviceInformation2, devinfo2)) || !devinfo2 ||
         FAILED(devinfo2->get_Pairing(pairing.put())) || !pairing) {
-      MWARNING("BLE: pairing interface unavailable");
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Remove a bond the device no longer honours.
+   *
+   * Returns true when a bond was actually dropped, so the caller can tell a
+   * recoverable stale-pairing failure from the device simply being out of range.
+   */
+  bool forget_stale_bond() {
+    ComPtr<IDeviceInformationPairing> pairing;
+    if (!get_pairing(pairing)) return false;
+
+    boolean is_paired = false;
+    pairing->get_IsPaired(&is_paired);
+    if (!is_paired) return false;
+
+    ComPtr<IDeviceInformationPairing2> pairing2;
+    if (FAILED(pairing.as(kIidDeviceInformationPairing2, pairing2)) || !pairing2) {
+      return false;
+    }
+    ComPtr<IAsyncOperationDeviceUnpairingResult> op;
+    if (FAILED(pairing2->UnpairAsync(op.put())) || FAILED(await_op(op, 20000))) {
+      return false;
+    }
+    MINFO("BLE: removed a stale Bluetooth pairing so the device can be paired again");
+    return true;
+  }
+
+  // Kept out of line: this is a distinct, user-visible phase of connecting, and
+  // having it as a real frame makes both crash reports and log traces legible.
+  __attribute__((noinline)) void ensure_paired() {
+    ComPtr<IDeviceInformationPairing> pairing;
+    if (!get_pairing(pairing)) {
+      MWARNING("BLE: pairing interface unavailable, continuing unbonded");
       return;
     }
 
@@ -1301,25 +1403,99 @@ private:
     MINFO("BLE: bonded");
   }
 
+  /**
+   * Claim the connection for the whole session.
+   *
+   * A GattSession with MaintainConnection asks Windows to bring the link up and
+   * keep it up, instead of connecting and disconnecting around each individual
+   * GATT operation. Everything afterwards - discovery, bonding, notifications,
+   * the protocol handshake - then runs over one uninterrupted connection.
+   */
+  void open_session() {
+    HStr device_id;
+    CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(m_device->get_DeviceId(device_id.put())),
+                               "BLE: the device has no identifier");
+
+    ComPtr<wdb::IBluetoothDeviceIdStatics> id_statics;
+    CHECK_AND_ASSERT_THROW_MES(
+        SUCCEEDED(get_activation_factory(L"Windows.Devices.Bluetooth.BluetoothDeviceId",
+                                         __uuidof(wdb::IBluetoothDeviceIdStatics),
+                                         id_statics)),
+        "BLE: Bluetooth device identifiers are unavailable");
+
+    ComPtr<wdb::IBluetoothDeviceId> bt_id;
+    CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(id_statics->FromId(device_id.get(), bt_id.put())) &&
+                                   bt_id,
+                               "BLE: could not resolve the device identifier");
+
+    ComPtr<wdg::IGattSessionStatics> session_statics;
+    CHECK_AND_ASSERT_THROW_MES(
+        SUCCEEDED(get_activation_factory(
+            L"Windows.Devices.Bluetooth.GenericAttributeProfile.GattSession",
+            __uuidof(wdg::IGattSessionStatics), session_statics)),
+        "BLE: GATT sessions are unavailable on this Windows version");
+
+    ComPtr<wf::IAsyncOperation<wdg::GattSession *>> op;
+    CHECK_AND_ASSERT_THROW_MES(
+        SUCCEEDED(session_statics->FromDeviceIdAsync(bt_id.get(), op.put())) &&
+            SUCCEEDED(await_op(op, 20000)) && SUCCEEDED(op->GetResults(m_session.put())) &&
+            m_session,
+        "BLE: could not open a connection to the device");
+
+    m_session->put_MaintainConnection(true);
+  }
+
+  /** Attempt the descriptor write that turns notifications on. */
+  bool write_cccd() {
+    ComPtr<wf::IAsyncOperation<wdg::GattCommunicationStatus>> op;
+    const HRESULT hr = m_tx->WriteClientCharacteristicConfigurationDescriptorAsync(
+        wdg::GattClientCharacteristicConfigurationDescriptorValue_Notify, op.put());
+    if (FAILED(hr) || FAILED(await_op(op))) return false;
+
+    wdg::GattCommunicationStatus status = wdg::GattCommunicationStatus_Unreachable;
+    op->GetResults(&status);
+    return status == wdg::GattCommunicationStatus_Success;
+  }
+
+  /**
+   * Subscribe to the device's notifications, bonding only if made to.
+   *
+   * Requesting an operating system pairing up front is what the Trezor's own
+   * Flutter client deliberately avoids everywhere except Android, on the
+   * grounds that the platform handles it implicitly and asking explicitly goes
+   * wrong. It goes wrong here too: the device treats an unsolicited pairing
+   * request as a failed attempt and leaves pairing mode.
+   *
+   * So the descriptor write is simply attempted. Windows elevates security by
+   * itself when the device asks for it, and that is the whole story most of the
+   * time. Only if the write still fails is pairing driven explicitly, which
+   * covers the case where the device demands an authenticated link and the
+   * platform has not arranged one.
+   */
   void subscribe() {
     m_notifications = new NotificationQueue();
-    HRESULT hr = m_tx->add_ValueChanged(m_notifications, &m_value_token);
+    const HRESULT hr = m_tx->add_ValueChanged(m_notifications, &m_value_token);
     if (FAILED(hr)) {
       m_notifications->Release();
       m_notifications = nullptr;
       CHECK_AND_ASSERT_THROW_MES(false, "BLE: could not listen for device notifications");
     }
 
-    ComPtr<wf::IAsyncOperation<wdg::GattCommunicationStatus>> op;
-    hr = m_tx->WriteClientCharacteristicConfigurationDescriptorAsync(
-        wdg::GattClientCharacteristicConfigurationDescriptorValue_Notify, op.put());
-    bool ok = SUCCEEDED(hr) && SUCCEEDED(await_op(op));
-    if (ok) {
-      wdg::GattCommunicationStatus status = wdg::GattCommunicationStatus_Unreachable;
-      op->GetResults(&status);
-      ok = (status == wdg::GattCommunicationStatus_Success);
+    if (write_cccd()) {
+      return;
     }
-    if (!ok) {
+
+    MDEBUG("BLE: notifications refused, the link needs to be bonded first");
+    try {
+      ensure_paired();
+    } catch (...) {
+      m_tx->remove_ValueChanged(m_value_token);
+      m_notifications->Release();
+      m_notifications = nullptr;
+      throw;
+    }
+
+    if (!write_cccd()) {
       m_tx->remove_ValueChanged(m_value_token);
       m_notifications->Release();
       m_notifications = nullptr;
@@ -1387,7 +1563,9 @@ std::chrono::steady_clock::time_point WinRtBleBackend::s_cache_time;
 bool WinRtBleBackend::s_cache_valid = false;
 unsigned WinRtBleBackend::s_empty_streak = 0;
 
-} // namespace
+} // namespace winrt_backend
+
+using namespace winrt_backend;
 
 void install_default_backend() {
   set_backend_factory([]() -> std::shared_ptr<BleBackend> {

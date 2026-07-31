@@ -117,6 +117,21 @@ void set_backend_factory(std::function<std::shared_ptr<BleBackend>()> factory);
 bool has_backend();
 
 /**
+ * Tell the backend the user is deliberately looking for a Bluetooth device.
+ *
+ * Enumeration runs on every device scan, including for USB, so by default the
+ * Bluetooth scan is kept short and its result cached - nobody opening a USB
+ * Trezor should wait on a radio scan. That trade-off is wrong when Bluetooth is
+ * what was actually asked for: the device only advertises while in pairing mode
+ * and can take tens of seconds to be heard, so a brief scan reports nothing and
+ * a cached "nothing" hides the device entirely.
+ *
+ * When set, enumeration scans for much longer and ignores any cached result.
+ */
+void set_active_search(bool active);
+bool active_search();
+
+/**
  * Install the backend for the platform this was built for, if there is one.
  *
  * Called once during start-up. On builds and platforms without Bluetooth

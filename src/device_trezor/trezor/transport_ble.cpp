@@ -32,6 +32,7 @@
 #include "misc_log_ex.h"
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <atomic>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -62,6 +63,13 @@ bool has_backend() {
   std::lock_guard<std::mutex> lock(g_backend_mutex);
   return static_cast<bool>(g_backend_factory);
 }
+
+namespace {
+std::atomic<bool> g_active_search{false};
+} // namespace
+
+void set_active_search(bool active) { g_active_search = active; }
+bool active_search() { return g_active_search; }
 
 namespace {
 std::shared_ptr<BleBackend> make_backend() {

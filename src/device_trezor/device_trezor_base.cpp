@@ -33,6 +33,7 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/regex.hpp>
+#include "trezor/transport_ble.hpp"
 
 namespace hw {
 namespace trezor {
@@ -118,6 +119,12 @@ namespace trezor {
 //      try {
       // Don't catch exceptions here, we want the error strings to propagate to the GUI
         hw::trezor::t_transport_vect trans;
+
+        // A device name of "Trezor:ble:..." means Bluetooth was explicitly
+        // chosen, so the scan should be thorough rather than the brief one that
+        // keeps USB enumeration responsive.
+        hw::trezor::ble::set_active_search(
+            boost::starts_with(this->name, hw::trezor::BleTransport::PATH_PREFIX));
 
         MDEBUG("Enumerating Trezor devices...");
         enumerate(trans);
