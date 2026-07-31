@@ -414,6 +414,19 @@ namespace trezor {
     void device_trezor_base::device_state_initialize_unsafe()
     {
       require_connected();
+
+      // The Trezor-Host Protocol replaces the legacy Initialize/Features
+      // session: firmware built with THP does not register a handler for
+      // Initialize at all, so sending one fails. Sessions there are created by
+      // the protocol layer with ThpCreateNewSession, and GetFeatures - which is
+      // handled by both - is enough to populate m_features.
+      if (m_transport && m_transport->protocol_has_own_sessions()) {
+        auto getFeatures = std::make_shared<messages::management::GetFeatures>();
+        m_features = this->client_exchange<messages::management::Features>(getFeatures);
+        m_device_session_id.clear();
+        return;
+      }
+
       auto initMsg = std::make_shared<messages::management::Initialize>();
       const auto data_cleaner = epee::misc_utils::create_scope_leave_handler([&]() {
         if (initMsg->has_session_id())

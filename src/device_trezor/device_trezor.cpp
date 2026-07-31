@@ -217,6 +217,12 @@ namespace trezor {
 
     void device_trezor::reset_session() {
       m_device_session_id.clear();
+      // Under THP the session lives in the protocol layer rather than in an
+      // Initialize message, so it has to be discarded there too; otherwise a
+      // retry with a different passphrase would keep using the old session.
+      if (m_transport) {
+        m_transport->reset_protocol_session();
+      }
     }
 
     bool device_trezor::seen_passphrase_entry_prompt() {

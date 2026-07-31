@@ -130,6 +130,16 @@ namespace trezor {
     virtual void session_end(Transport & transport){ };
     virtual void write(Transport & transport, const google::protobuf::Message & req)= 0;
     virtual void read(Transport & transport, std::shared_ptr<google::protobuf::Message> & msg, messages::MessageType * msg_type=nullptr)= 0;
+
+    /**
+     * Discard any protocol-level session so the next exchange establishes a
+     * fresh one. Used when the passphrase changes. The legacy protocol carries
+     * its session in the Initialize message and needs nothing here.
+     */
+    virtual void reset_session() { };
+
+    /** True for protocols that replace the legacy Initialize/Features session. */
+    virtual bool has_own_sessions() const { return false; };
   };
 
   class ProtocolV1 : public Protocol {
@@ -175,6 +185,11 @@ namespace trezor {
      * devices that speak the legacy protocol.
      */
     virtual void set_pairing_ui(std::shared_ptr<thp::PairingUI> ui) { m_pairing_ui = std::move(ui); };
+
+    /** Forwarded to the active protocol; see Protocol::reset_session. */
+    virtual void reset_protocol_session() { };
+    /** Forwarded to the active protocol; see Protocol::has_own_sessions. */
+    virtual bool protocol_has_own_sessions() const { return false; };
 
   protected:
     long m_open_counter;
@@ -249,6 +264,9 @@ namespace trezor {
     void write_chunk(const void * buff, size_t size) override;
     size_t read_chunk(void * buff, size_t size) override;
 
+    void reset_protocol_session() override { if (m_proto) m_proto->reset_session(); };
+    bool protocol_has_own_sessions() const override { return m_proto && m_proto->has_own_sessions(); };
+
     std::ostream& dump(std::ostream& o) const override;
 
   private:
@@ -297,6 +315,9 @@ namespace trezor {
     void write_chunk(const void * buff, size_t size) override;
     size_t read_chunk(void * buff, size_t size) override;
     size_t read_chunk_timeout(void * buff, size_t size, unsigned timeout_ms) override;
+
+    void reset_protocol_session() override { if (m_proto) m_proto->reset_session(); };
+    bool protocol_has_own_sessions() const override { return m_proto && m_proto->has_own_sessions(); };
 
     std::ostream& dump(std::ostream& o) const override;
 

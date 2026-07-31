@@ -87,6 +87,9 @@ namespace
     bool created_session = false;
     uint8_t session_id_used = 0xFF;
     std::string session_passphrase;
+    int session_create_count = 0;
+    std::vector<uint8_t> session_ids;
+    std::vector<std::string> session_passphrases;
     bool saw_end_request = false;
     bool tag_rejected = false;
     bool saw_button_ack = false;
@@ -490,6 +493,9 @@ namespace
           created_session = true;
           session_id_used = sid;
           session_passphrase = s.passphrase();
+          ++session_create_count;
+          session_ids.push_back(sid);
+          session_passphrases.push_back(s.passphrase());
           send_app(sid, wire_type::Success, proto_bytes(messages::common::Success()));
           break;
         }
@@ -676,6 +682,61 @@ TEST(trezor_thp_protocol, stored_credential_skips_pairing)
   ASSERT_FALSE(ui->asked);
   ASSERT_TRUE(transport.device.saw_end_request);
   ASSERT_TRUE(transport.device.created_session);
+}
+
+// A passphrase-aware UI, so session re-derivation can be observed.
+namespace {
+  class PassphraseUI : public EchoPairingUI
+  {
+  public:
+    using EchoPairingUI::EchoPairingUI;
+    boost::optional<std::string> on_passphrase_request(bool &on_device) override
+    {
+      on_device = false;
+      ++passphrase_requests;
+      return next_passphrase;
+    }
+    std::string next_passphrase;
+    int passphrase_requests = 0;
+  };
+}
+
+TEST(trezor_thp_protocol, reset_session_rederives_with_a_new_passphrase)
+{
+  // The wallet probes the device with an empty passphrase, and if the resulting
+  // address does not match it calls reset_session() and retries with the real
+  // one. That must produce a genuinely new session rather than reusing the old.
+  LoopbackTransport transport;
+  TempStore store;
+
+  ProtocolThp proto;
+  auto ui = std::make_shared<PassphraseUI>(transport.device);
+  ui->next_passphrase = "";
+  proto.set_pairing_ui(ui);
+  proto.set_credential_store(std::make_shared<FileCredentialStore>(store.path.string()));
+
+  ASSERT_NO_THROW(proto.session_begin(transport));
+  ASSERT_EQ(1, transport.device.session_create_count);
+  ASSERT_EQ("", transport.device.session_passphrases[0]);
+  const uint8_t first_session = transport.device.session_ids[0];
+
+  // THP owns its sessions, so the device layer must not fall back to Initialize.
+  ASSERT_TRUE(proto.has_own_sessions());
+
+  // Retry with a real passphrase.
+  ui->next_passphrase = "hunter2";
+  proto.reset_session();
+
+  messages::common::ButtonAck req;
+  ASSERT_NO_THROW(proto.write(transport, req));
+  std::shared_ptr<google::protobuf::Message> resp;
+  ASSERT_NO_THROW(proto.read(transport, resp, nullptr));
+
+  ASSERT_EQ(2, transport.device.session_create_count);
+  ASSERT_EQ("hunter2", transport.device.session_passphrases[1]);
+  ASSERT_NE(first_session, transport.device.session_ids[1]);
+  // Pairing must not have been repeated; the channel survives a session reset.
+  ASSERT_EQ(1, transport.device.session_create_count - 1);
 }
 
 TEST(trezor_thp_protocol, probe_detects_thp_device)

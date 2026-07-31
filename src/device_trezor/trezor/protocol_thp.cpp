@@ -241,6 +241,16 @@ void ProtocolThp::reset_channel() {
   m_pending_message = boost::none;
 }
 
+void ProtocolThp::reset_session() {
+  // Keep the encrypted channel; only the session is discarded. The wallet uses
+  // this to re-derive with a different passphrase after probing with an empty
+  // one, so the cached passphrase has to go too or the retry would reuse it.
+  m_session_created = false;
+  m_passphrase = boost::none;
+  m_passphrase_on_device = false;
+  MDEBUG("THP: session reset; a new one will be created on the next message");
+}
+
 void ProtocolThp::set_passphrase(const std::string &passphrase, bool on_device) {
   m_passphrase = passphrase;
   m_passphrase_on_device = on_device;
@@ -905,9 +915,11 @@ void ProtocolThp::create_session(Transport &transport) {
   }
   req.set_derive_cardano(false);
 
-  // Session 0 is the pairing/management session; passphrase wallets get their
-  // own session id.
-  m_session_id = (m_passphrase || m_passphrase_on_device) ? 1 : 0;
+  // Session 0 stays reserved for pairing and management, and each derivation
+  // gets its own id so retrying with a different passphrase does not reuse the
+  // previous session.
+  if (++m_session_counter > 0xFF) m_session_counter = 1;
+  m_session_id = static_cast<uint8_t>(m_session_counter);
 
   write_app(transport, m_session_id, wire_type::ThpCreateNewSession, serialize_proto(req));
   read_app_expect(transport, m_session_id, wire_type::Success, "creating a session");
@@ -946,6 +958,9 @@ void ProtocolThp::session_end(Transport &transport) {
 
 void ProtocolThp::write(Transport &transport, const google::protobuf::Message &req) {
   CHECK_AND_ASSERT_THROW_MES(m_channel_open, "THP: channel is not open");
+  // reset_session() may have discarded the session; re-establish it lazily so
+  // callers do not have to know about THP's session model.
+  if (!m_session_created) create_session(transport);
   const auto wire = MessageMapper::get_message_wire_number(req);
   write_app(transport, m_session_id, static_cast<uint16_t>(wire), serialize_proto(req));
 }

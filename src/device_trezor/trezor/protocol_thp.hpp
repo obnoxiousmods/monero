@@ -170,6 +170,19 @@ public:
   void read(Transport &transport, std::shared_ptr<google::protobuf::Message> &msg,
             messages::MessageType *msg_type = nullptr) override;
 
+  /**
+   * Drop the current THP session. The next application message creates a new
+   * one, asking for the passphrase again - which is how the wallet retries with
+   * a different passphrase after probing with an empty one.
+   */
+  void reset_session() override;
+
+  /**
+   * THP replaces the legacy Initialize/Features session entirely; the device
+   * does not even register a handler for Initialize.
+   */
+  bool has_own_sessions() const override { return true; }
+
   /** Supply the UI used for pairing interaction. */
   void set_pairing_ui(std::shared_ptr<thp::PairingUI> ui) { m_pairing_ui = std::move(ui); }
   /** Supply persistent credential storage. Defaults to a file-backed store. */
@@ -273,6 +286,8 @@ private:
   bool m_credential_matched = false;
 
   uint8_t m_session_id = 0;
+  /** Incremented per created session; 0 stays reserved for pairing/management. */
+  unsigned m_session_counter = 0;
   bool m_session_created = false;
   boost::optional<std::string> m_passphrase;
   bool m_passphrase_on_device = false;
