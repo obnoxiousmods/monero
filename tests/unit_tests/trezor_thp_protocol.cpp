@@ -90,6 +90,7 @@ namespace
     bool saw_end_request = false;
     bool tag_rejected = false;
     bool saw_button_ack = false;
+    bool rejected_autoconnect = false;
     /** Interleave a ButtonRequest before the end-of-handshake response. */
     bool button_request_before_end = true;
 
@@ -415,16 +416,42 @@ namespace
 
         case wire_type::ThpCredentialRequest:
         {
+          mthp::ThpCredentialRequest r;
+          ASSERT_TRUE(r.ParseFromArray(body.data(), (int) body.size()));
+
+          // Mirror the firmware: an autoconnect credential cannot be requested
+          // directly after pairing, only as an upgrade of one already held.
+          // Real firmware raises here, which then breaks the rest of the
+          // channel, so refuse the same way.
+          if (r.autoconnect() && r.credential().empty())
+          {
+            rejected_autoconnect = true;
+            m_workflow_broken = true;
+            messages::common::Failure f;
+            f.set_message("Cannot ask for autoconnect credential after pairing");
+            send_app(sid, wire_type::Failure, proto_bytes(f));
+            break;
+          }
+
           issued_credential = true;
-          mthp::ThpCredentialResponse r;
-          r.set_trezor_static_public_key(static_pub.data(), static_pub.size());
-          r.set_credential("test-credential-blob");
-          send_app(sid, wire_type::ThpCredentialResponse, proto_bytes(r));
+          mthp::ThpCredentialResponse resp;
+          resp.set_trezor_static_public_key(static_pub.data(), static_pub.size());
+          resp.set_credential("test-credential-blob");
+          send_app(sid, wire_type::ThpCredentialResponse, proto_bytes(resp));
           break;
         }
 
         case wire_type::ThpEndRequest:
           saw_end_request = true;
+          if (m_workflow_broken)
+          {
+            // Once the pairing workflow has raised, the device fails every
+            // subsequent message on the channel rather than completing.
+            messages::common::Failure f;
+            f.set_message("Firmware error");
+            send_app(sid, wire_type::Failure, proto_bytes(f));
+            break;
+          }
           if (button_request_before_end)
           {
             // Real devices interleave ButtonRequests into any phase when they
@@ -489,6 +516,7 @@ namespace
     bool m_paired = false;
     bool m_tx_seq = false;
     int m_pending_end_session = -1;
+    bool m_workflow_broken = false;
   };
 
   /** Transport that wires ProtocolThp directly to the simulated device. */
@@ -557,6 +585,9 @@ TEST(trezor_thp_protocol, full_pairing_handshake_and_session)
   // the CPace tag check inside the device would have failed.
   ASSERT_TRUE(ui->asked);
   ASSERT_EQ(6u, transport.device.displayed_code.size());
+  // The credential must have been requested without autoconnect: asking for it
+  // straight after pairing is refused by the firmware and breaks the channel.
+  ASSERT_FALSE(transport.device.rejected_autoconnect);
   ASSERT_TRUE(transport.device.issued_credential);
   ASSERT_TRUE(transport.device.saw_end_request);
   ASSERT_TRUE(transport.device.created_session);

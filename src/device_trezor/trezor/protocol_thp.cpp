@@ -836,9 +836,15 @@ void ProtocolThp::code_entry_pairing(Transport &transport) {
 void ProtocolThp::request_credential(Transport &transport) {
   mthp::ThpCredentialRequest req;
   req.set_host_static_public_key(m_host_static_pub.data(), m_host_static_pub.size());
-  // Autoconnect lets subsequent connections skip the confirmation dialog.
-  req.set_autoconnect(true);
-  if (!m_credential.empty())
+
+  // Autoconnect lets later connections skip the confirmation dialog, but the
+  // firmware refuses to issue such a credential directly after pairing - it
+  // will only upgrade one we already hold. Asking anyway raises a DataError
+  // inside the device's pairing workflow, which then fails every subsequent
+  // message on the channel. So ask for it only when replaying a credential.
+  const bool have_credential = !m_credential.empty();
+  req.set_autoconnect(have_credential);
+  if (have_credential)
     req.set_credential(m_credential.data(), m_credential.size());
   write_app(transport, 0, wire_type::ThpCredentialRequest, serialize_proto(req));
 
