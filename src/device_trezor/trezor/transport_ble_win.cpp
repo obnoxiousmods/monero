@@ -96,6 +96,7 @@
 #include <windows.devices.bluetooth.h>
 #include <windows.devices.bluetooth.advertisement.h>
 #include <windows.devices.bluetooth.genericattributeprofile.h>
+#include <windows.devices.enumeration.h>
 #include <windows.storage.streams.h>
 
 #include <algorithm>
@@ -121,6 +122,7 @@ namespace wdb = ABI::Windows::Devices::Bluetooth;
 namespace wda = ABI::Windows::Devices::Bluetooth::Advertisement;
 namespace wdg = ABI::Windows::Devices::Bluetooth::GenericAttributeProfile;
 namespace wss = ABI::Windows::Storage::Streams;
+namespace wde = ABI::Windows::Devices::Enumeration;
 
 // ---------------------------------------------------------------------------
 // Trezor GATT profile, as binary GUIDs.
@@ -167,6 +169,131 @@ struct IBluetoothLEDevice3 : public IInspectable {
       GUID serviceUuid, wdb::BluetoothCacheMode cacheMode,
       wf::IAsyncOperation<wdg::GattDeviceServicesResult *> **operation) = 0;
 };
+
+/**
+ * IBluetoothLEDeviceStatics2, from the Windows SDK IDL.
+ *
+ * mingw-w64 only defines the v1 statics, whose FromBluetoothAddressAsync assumes
+ * a *public* address. The Trezor advertises a resolvable private (random)
+ * address, so connecting through the v1 call targets an address kind the device
+ * does not have and service discovery comes back Unreachable.
+ */
+const GUID kIidBluetoothLEDeviceStatics2 =
+    {0x5f12c06b, 0x3bac, 0x43e8, {0xad, 0x16, 0x56, 0x32, 0x71, 0xbd, 0x41, 0xc2}};
+
+struct IBluetoothLEDeviceStatics2 : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE GetDeviceSelectorFromPairingState(boolean, HSTRING *) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetDeviceSelectorFromConnectionStatus(int, HSTRING *) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetDeviceSelectorFromDeviceName(HSTRING, HSTRING *) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetDeviceSelectorFromBluetoothAddress(UINT64, HSTRING *) = 0;
+  virtual HRESULT STDMETHODCALLTYPE
+      GetDeviceSelectorFromBluetoothAddressWithBluetoothAddressType(UINT64, int, HSTRING *) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetDeviceSelectorFromAppearance(void *, HSTRING *) = 0;
+  virtual HRESULT STDMETHODCALLTYPE FromBluetoothAddressWithBluetoothAddressTypeAsync(
+      UINT64 address, int addressType,
+      wf::IAsyncOperation<wdb::BluetoothLEDevice *> **operation) = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Pairing
+//
+// The Trezor refuses to enable notifications over an unauthenticated link:
+// writing the CCCD returns 0x80650005, which is ATT error 0x05 "Insufficient
+// Authentication". The link has to be bonded first, in the same connect-then-
+// pair order trezorlib uses.
+//
+// mingw-w64 defines none of these interfaces, and its IDeviceInformation is
+// truncated (the Pairing property lives on IDeviceInformation2 in any case), so
+// they are declared here from the Windows SDK IDL.
+// ---------------------------------------------------------------------------
+
+const GUID kIidDeviceInformation2 =
+    {0xf156a638, 0x7997, 0x48d9, {0xa1, 0x0c, 0x26, 0x9d, 0x46, 0x53, 0x3f, 0x48}};
+const GUID kIidDeviceInformationPairing =
+    {0x2c4769f5, 0xf684, 0x40d5, {0x84, 0x69, 0xe8, 0xdb, 0xaa, 0xb7, 0x04, 0x85}};
+const GUID kIidDeviceInformationPairing2 =
+    {0xf68612fd, 0x0aee, 0x4328, {0x85, 0xcc, 0x1c, 0x74, 0x2b, 0xb1, 0x79, 0x0d}};
+
+// DevicePairingKinds bit flags.
+enum {
+  kPairingKindConfirmOnly = 1,
+  kPairingKindDisplayPin = 2,
+  kPairingKindConfirmPinMatch = 8,
+};
+
+struct IDevicePairingResult : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_Status(int *status) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_ProtectionLevelUsed(int *value) = 0;
+};
+
+// Standard IAsyncOperation<T> vtable shape. Declared by hand because mingw has
+// no instantiation for DevicePairingResult; the pointer PairAsync returns is
+// already this interface, and awaiting only needs IAsyncInfo, which is standard.
+struct IAsyncOperationDevicePairingResult : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE put_Completed(void *handler) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_Completed(void **handler) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetResults(IDevicePairingResult **result) = 0;
+};
+
+struct IDevicePairingRequestedEventArgs : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_DeviceInformation(void **value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_PairingKind(int *value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_Pin(HSTRING *value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE Accept() = 0;
+  virtual HRESULT STDMETHODCALLTYPE AcceptWithPin(HSTRING pin) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetDeferral(void **result) = 0;
+};
+
+struct IDeviceInformationCustomPairing : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE PairAsync(
+      int pairingKindsSupported, IAsyncOperationDevicePairingResult **result) = 0;
+  virtual HRESULT STDMETHODCALLTYPE PairWithProtectionLevelAsync(
+      int pairingKindsSupported, int minProtectionLevel,
+      IAsyncOperationDevicePairingResult **result) = 0;
+  virtual HRESULT STDMETHODCALLTYPE PairWithProtectionLevelAndSettingsAsync(
+      int pairingKindsSupported, int minProtectionLevel, void *settings,
+      IAsyncOperationDevicePairingResult **result) = 0;
+  virtual HRESULT STDMETHODCALLTYPE add_PairingRequested(IUnknown *handler,
+                                                        EventRegistrationToken *token) = 0;
+  virtual HRESULT STDMETHODCALLTYPE remove_PairingRequested(EventRegistrationToken token) = 0;
+};
+
+struct IDeviceInformationPairing : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_IsPaired(boolean *value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_CanPair(boolean *value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE PairAsync(IAsyncOperationDevicePairingResult **result) = 0;
+  virtual HRESULT STDMETHODCALLTYPE PairWithProtectionLevelAsync(
+      int minProtectionLevel, IAsyncOperationDevicePairingResult **result) = 0;
+};
+
+struct IDeviceInformationPairing2 : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_ProtectionLevel(int *value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_Custom(IDeviceInformationCustomPairing **value) = 0;
+};
+
+// The Pairing property lives here rather than on IDeviceInformation, and
+// mingw's IDeviceInformation is truncated in any case.
+struct IDeviceInformation2 : public IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_Kind(int *value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_Pairing(IDeviceInformationPairing **value) = 0;
+};
+
+const char *pairing_status_name(int s) {
+  switch (s) {
+    case 0: return "paired";
+    case 1: return "not ready to pair";
+    case 2: return "not paired";
+    case 3: return "already paired";
+    case 4: return "connection rejected";
+    case 7: return "authentication timed out";
+    case 8: return "authentication not allowed";
+    case 9: return "authentication failed";
+    case 14: return "pairing cancelled";
+    case 16: return "no pairing handler registered";
+    case 19: return "failed";
+    default: return "unknown error";
+  }
+}
 
 /**
  * IAgileObject is a marker interface with no methods. Implementing it tells the
@@ -331,6 +458,82 @@ private:
   IID m_iid;
 };
 
+/**
+ * Answers the Bluetooth pairing ceremony.
+ *
+ * The Trezor asks for ConfirmPinMatch: it shows a six digit code on its screen
+ * and expects both sides to agree. We accept immediately and the user confirms
+ * on the device itself, which is where the code is displayed - there is nothing
+ * for the host to check it against.
+ *
+ * The parameterised IID of
+ * ITypedEventHandler<DeviceInformationCustomPairing*, DevicePairingRequestedEventArgs*>
+ * appears in no header available to this build. WinRT derives such IIDs
+ * deterministically as a UUIDv5 over the generic type signature, so it is
+ * computed offline instead; contrib/trezor/piid.py performs the derivation and
+ * validates it against a parameterised IID the headers *do* publish.
+ *
+ * Answering QueryInterface for every IID does not work here: the runtime probes
+ * for IMarshal, and handing it this object makes add_PairingRequested fail with
+ * 0x80004021. Only the interfaces actually implemented are claimed.
+ */
+class PairingRequestedHandler : public IUnknown {
+public:
+  ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&m_refs); }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const LONG n = InterlockedDecrement(&m_refs);
+    if (n == 0) delete this;
+    return (ULONG)n;
+  }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
+    if (!ppv) return E_POINTER;
+    // fa65231f-4178-5de1-b2cc-03e22d7702b4
+    static const GUID kHandlerIid =
+        {0xfa65231f, 0x4178, 0x5de1, {0xb2, 0xcc, 0x03, 0xe2, 0x2d, 0x77, 0x02, 0xb4}};
+    if (IsEqualGUID(riid, IID_IUnknown) || IsEqualGUID(riid, kHandlerIid) ||
+        IsEqualGUID(riid, kIidAgileObject)) {
+      *ppv = this;
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  // Vtable slot 4: Invoke(sender, args).
+  virtual HRESULT STDMETHODCALLTYPE Invoke(void * /*sender*/,
+                                           IDevicePairingRequestedEventArgs *args) {
+    if (!args) return S_OK;
+    int kind = 0;
+    args->get_PairingKind(&kind);
+
+    HSTRING pin = nullptr;
+    args->get_Pin(&pin);
+    if (pin) {
+      UINT32 len = 0;
+      const wchar_t *raw = WindowsGetStringRawBuffer(pin, &len);
+      std::string text;
+      for (UINT32 i = 0; i < len; ++i) text += (char)raw[i];
+      WindowsDeleteString(pin);
+      MINFO("BLE: confirm this code on the Trezor: " << text);
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_pin = text;
+    }
+    args->Accept();
+    return S_OK;
+  }
+
+  std::string pin() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_pin;
+  }
+
+private:
+  LONG m_refs = 1;
+  std::mutex m_mutex;
+  std::string m_pin;
+};
+
 std::string mac_to_string(uint64_t addr) {
   char buf[24];
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -340,11 +543,28 @@ std::string mac_to_string(uint64_t addr) {
   return buf;
 }
 
-/** Parse "AA:BB:CC:DD:EE:FF" back into the 48-bit address WinRT wants. */
-bool string_to_mac(const std::string &s, uint64_t &out) {
+/**
+ * Parse "AA:BB:CC:DD:EE:FF" or "AA:BB:CC:DD:EE:FF/R" back into the address and
+ * address type WinRT wants.
+ *
+ * The trailing marker records whether the peripheral used a random address. It
+ * has to survive the round trip through the transport path, because connecting
+ * to a random address as though it were public yields an unreachable device.
+ */
+bool string_to_mac(const std::string &s, uint64_t &out, int &addr_type) {
+  addr_type = 2;  // Unspecified
+  std::string body = s;
+  const size_t slash = s.find('/');
+  if (slash != std::string::npos) {
+    body = s.substr(0, slash);
+    const std::string tag = s.substr(slash + 1);
+    if (tag == "R" || tag == "r") addr_type = 1;       // Random
+    else if (tag == "P" || tag == "p") addr_type = 0;  // Public
+  }
+
   uint64_t addr = 0;
   int nibbles = 0;
-  for (char c : s) {
+  for (char c : body) {
     if (c == ':' || c == '-') continue;
     int v;
     if (c >= '0' && c <= '9') v = c - '0';
@@ -409,6 +629,20 @@ public:
     adv->get_LocalName(local_name.put());
     const std::string name = local_name.to_utf8();
 
+    // The address type is authoritative from the advertisement; the Trezor uses
+    // a rotating random address and connecting to it as public fails.
+    int address_type = 2;  // Unspecified
+    {
+      ComPtr<wda::IBluetoothLEAdvertisementReceivedEventArgs2> args2;
+      if (SUCCEEDED(args->QueryInterface(
+              __uuidof(wda::IBluetoothLEAdvertisementReceivedEventArgs2),
+              args2.put_void())) &&
+          args2) {
+        wdb::BluetoothAddressType at;
+        if (SUCCEEDED(args2->get_BluetoothAddressType(&at))) address_type = (int)at;
+      }
+    }
+
     bool now_matches = false;
     {
       std::lock_guard<std::mutex> lock(m_mutex);
@@ -416,6 +650,7 @@ public:
       const bool was_trezor = e.is_trezor;
       e.is_trezor = e.is_trezor || is_trezor;
       if (!name.empty()) e.name = name;
+      if (address_type != 2) e.addr_type = address_type;
       now_matches = e.is_trezor && !was_trezor;
     }
     // Wake enumerate() as soon as the first Trezor shows up, so discovery
@@ -438,6 +673,8 @@ public:
       if (!kv.second.is_trezor) continue;
       BleDeviceInfo info;
       info.address = mac_to_string(kv.first);
+      if (kv.second.addr_type == 1) info.address += "/R";
+      else if (kv.second.addr_type == 0) info.address += "/P";
       info.name = kv.second.name.empty() ? "Trezor" : kv.second.name;
       // This transport never uses operating-system bonding, so a device is
       // never "paired" in that sense. Trezor pairing happens inside THP.
@@ -451,6 +688,8 @@ private:
   struct Entry {
     std::string name;
     bool is_trezor = false;
+    // BluetoothAddressType: 0=Public 1=Random 2=Unspecified.
+    int addr_type = 2;
   };
 
   std::mutex m_mutex;
@@ -630,14 +869,61 @@ public:
     return devices;
   }
 
+  /**
+   * Connect, retrying with a freshly scanned address when needed.
+   *
+   * The Trezor advertises a resolvable private address that rotates, so any
+   * address we were handed goes stale on its own schedule - a remembered one
+   * almost certainly has. A failure is therefore expected rather than
+   * exceptional, and the useful response is to scan again and use whatever
+   * address the device is currently answering to. Only after several rounds of
+   * that is the failure reported to the caller.
+   */
   void connect(const std::string &address) override {
     ensure_apartment();
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    disconnect_locked();
+    std::string target = address;
+    std::string last_error = "no attempt was made";
 
+    for (unsigned attempt = 1; attempt <= CONNECT_ATTEMPTS; ++attempt) {
+      disconnect_locked();
+      try {
+        connect_locked(target);
+        m_connected = true;
+        MINFO("BLE: connected to " << target << ", packet size " << m_packet_size);
+        return;
+      } catch (const std::exception &e) {
+        last_error = e.what();
+        MWARNING("BLE: connect attempt " << attempt << " of " << CONNECT_ATTEMPTS
+                                         << " failed: " << last_error);
+      }
+
+      if (attempt == CONNECT_ATTEMPTS) break;
+
+      // Look for the device again; its address has very likely changed.
+      const std::string fresh = rescan_for_trezor();
+      if (!fresh.empty() && fresh != target) {
+        MDEBUG("BLE: device moved to " << fresh << ", retrying there");
+        target = fresh;
+      } else if (!fresh.empty()) {
+        MDEBUG("BLE: device still at " << fresh << ", retrying");
+      } else {
+        MDEBUG("BLE: device is not advertising; is it awake and in pairing mode?");
+      }
+    }
+
+    disconnect_locked();
+    throw exc::DeviceAcquireException("BLE: could not connect to the Trezor after " +
+                                      std::to_string(CONNECT_ATTEMPTS) +
+                                      " attempts. Last error: " + last_error);
+  }
+
+  /** One connection attempt. Caller must hold m_mutex. */
+  void connect_locked(const std::string &address) {
     uint64_t addr = 0;
-    CHECK_AND_ASSERT_THROW_MES(string_to_mac(address, addr),
+    int addr_type = 2;
+    CHECK_AND_ASSERT_THROW_MES(string_to_mac(address, addr, addr_type),
                                "BLE: malformed device address: " << address);
 
     ComPtr<wdb::IBluetoothLEDeviceStatics> statics;
@@ -645,8 +931,18 @@ public:
                                         __uuidof(wdb::IBluetoothLEDeviceStatics), statics);
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr), "BLE: Bluetooth is unavailable on this system");
 
+    // Use the address-type-aware overload whenever the type is known. The v1
+    // call assumes a public address, which a random-addressed peripheral simply
+    // does not answer to.
     ComPtr<wf::IAsyncOperation<wdb::BluetoothLEDevice *>> dev_op;
-    hr = statics->FromBluetoothAddressAsync(addr, dev_op.put());
+    ComPtr<IBluetoothLEDeviceStatics2> statics2;
+    if (addr_type != 2 &&
+        SUCCEEDED(statics.as(kIidBluetoothLEDeviceStatics2, statics2)) && statics2) {
+      hr = statics2->FromBluetoothAddressWithBluetoothAddressTypeAsync(addr, addr_type,
+                                                                      dev_op.put());
+    } else {
+      hr = statics->FromBluetoothAddressAsync(addr, dev_op.put());
+    }
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr) && SUCCEEDED(await_op(dev_op)),
                                "BLE: could not reach the device at " << address);
     hr = dev_op->GetResults(m_device.put());
@@ -694,10 +990,8 @@ public:
     CHECK_AND_ASSERT_THROW_MES(SUCCEEDED(hr) && m_rx3, "BLE: unsupported RX characteristic");
 
     configure_session();
+    ensure_paired();
     subscribe();
-
-    m_connected = true;
-    MINFO("BLE: connected to " << address << ", packet size " << m_packet_size);
   }
 
   void disconnect() override {
@@ -796,6 +1090,11 @@ private:
   static constexpr unsigned SCAN_TIMEOUT_MS = 2500;
   static constexpr unsigned WRITE_TIMEOUT_MS = 10000;
   static constexpr unsigned CACHE_TTL_S = 10;
+  // Pairing waits on a person reading a code off the device screen.
+  static constexpr unsigned PAIRING_TIMEOUT_MS = 90000;
+  // A rotating address makes the first attempt a coin flip, so retry a few
+  // times with a fresh scan between each.
+  static constexpr unsigned CONNECT_ATTEMPTS = 4;
   static constexpr unsigned MAX_CACHE_TTL_S = 320;
 
   /** How long the current cached result stays good. Caller must hold the lock. */
@@ -872,6 +1171,134 @@ private:
       m_packet_size = std::min<size_t>(BLE_PACKET_SIZE, (size_t)mtu - 3);
       MDEBUG("BLE: negotiated ATT MTU " << mtu << ", packet size " << m_packet_size);
     }
+  }
+
+  /**
+   * Scan again and return the address the Trezor is currently advertising, or
+   * an empty string if it is not answering. The cache is dropped first so this
+   * cannot return the very address that just failed.
+   */
+  std::string rescan_for_trezor() {
+    {
+      std::lock_guard<std::mutex> lock(s_cache_mutex);
+      s_cache_valid = false;
+      s_empty_streak = 0;  // a deliberate retry is not a background poll
+    }
+    try {
+      const auto devices = enumerate();
+      if (!devices.empty()) return devices.front().address;
+    } catch (const std::exception &e) {
+      MDEBUG("BLE: rescan failed: " << e.what());
+    }
+    return {};
+  }
+
+  /**
+   * Bond with the device.
+   *
+   * The Trezor will not enable notifications over an unauthenticated link -
+   * writing the CCCD returns ATT error 0x05, "Insufficient Authentication" - so
+   * the link has to be bonded first. Connect first, pair second, matching
+   * trezorlib.
+   *
+   * Custom pairing is used rather than the default ceremony because the default
+   * wants the operating system's own pairing UI and fails in a process that does
+   * not raise it. The device asks for ConfirmPinMatch and shows a six digit code
+   * that the user confirms on the device itself.
+   */
+  // Kept out of line: this is a distinct, user-visible phase of connecting, and
+  // having it as a real frame makes both crash reports and log traces legible.
+  __attribute__((noinline)) void ensure_paired() {
+    ComPtr<wde::IDeviceInformation> devinfo;
+    HStr devid;
+    m_device->get_DeviceId(devid.put());
+
+    ComPtr<wde::IDeviceInformationStatics> di_statics;
+    if (FAILED(get_activation_factory(L"Windows.Devices.Enumeration.DeviceInformation",
+                                      __uuidof(wde::IDeviceInformationStatics),
+                                      di_statics))) {
+      MWARNING("BLE: device enumeration unavailable, skipping pairing");
+      return;
+    }
+    ComPtr<wf::IAsyncOperation<wde::DeviceInformation *>> diop;
+    if (FAILED(di_statics->CreateFromIdAsync(devid.get(), diop.put())) ||
+        FAILED(await_op(diop, 15000)) || FAILED(diop->GetResults(devinfo.put())) ||
+        !devinfo) {
+      MWARNING("BLE: could not read device information, skipping pairing");
+      return;
+    }
+
+    ComPtr<IDeviceInformation2> devinfo2;
+    ComPtr<IDeviceInformationPairing> pairing;
+    if (FAILED(devinfo.as(kIidDeviceInformation2, devinfo2)) || !devinfo2 ||
+        FAILED(devinfo2->get_Pairing(pairing.put())) || !pairing) {
+      MWARNING("BLE: pairing interface unavailable");
+      return;
+    }
+
+    boolean is_paired = false;
+    pairing->get_IsPaired(&is_paired);
+    if (is_paired) {
+      MDEBUG("BLE: already bonded");
+      return;
+    }
+
+    boolean can_pair = false;
+    pairing->get_CanPair(&can_pair);
+    CHECK_AND_ASSERT_THROW_MES(can_pair, "BLE: the device is not accepting pairing. "
+                                         "Put it into Bluetooth pairing mode and retry.");
+
+    ComPtr<IDeviceInformationPairing2> pairing2;
+    ComPtr<IDeviceInformationCustomPairing> custom;
+    CHECK_AND_ASSERT_THROW_MES(
+        SUCCEEDED(pairing.as(kIidDeviceInformationPairing2, pairing2)) && pairing2 &&
+            SUCCEEDED(pairing2->get_Custom(custom.put())) && custom,
+        "BLE: this Windows version cannot pair with the device");
+
+    PairingRequestedHandler *handler = new PairingRequestedHandler();
+    EventRegistrationToken token{};
+    HRESULT hr = custom->add_PairingRequested(handler, &token);
+    if (FAILED(hr)) {
+      handler->Release();
+      CHECK_AND_ASSERT_THROW_MES(false, "BLE: could not start pairing (hr=0x"
+                                            << std::hex << hr << ")");
+    }
+
+    MINFO("BLE: pairing - confirm the code shown on the Trezor");
+
+    // Offer every ceremony the device might pick; Windows selects one both ends
+    // support. Encryption is the point of the exercise, so require it.
+    const int kinds =
+        kPairingKindConfirmOnly | kPairingKindDisplayPin | kPairingKindConfirmPinMatch;
+    ComPtr<IAsyncOperationDevicePairingResult> op;
+    hr = custom->PairWithProtectionLevelAsync(kinds, 2 /* Encryption */, op.put());
+
+    int status = -1;
+    bool ok = SUCCEEDED(hr) && SUCCEEDED(await_op(op, PAIRING_TIMEOUT_MS));
+    if (ok) {
+      ComPtr<IDevicePairingResult> result;
+      if (SUCCEEDED(op->GetResults(result.put())) && result) {
+        result->get_Status(&status);
+      }
+      // AlreadyPaired is as good as Paired for our purposes.
+      ok = (status == 0 || status == 3);
+    }
+
+    const std::string pin = handler->pin();
+    custom->remove_PairingRequested(token);
+    handler->Release();
+
+    if (!ok) {
+      std::string hint;
+      if (status == 19 || status == 7) {
+        hint = pin.empty()
+                   ? ". Confirm the pairing code on the Trezor when it appears."
+                   : ". The code " + pin + " had to be confirmed on the Trezor.";
+      }
+      CHECK_AND_ASSERT_THROW_MES(false, "BLE: pairing failed ("
+                                            << pairing_status_name(status) << ")" << hint);
+    }
+    MINFO("BLE: bonded");
   }
 
   void subscribe() {
