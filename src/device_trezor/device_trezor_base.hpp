@@ -94,6 +94,7 @@ namespace trezor {
     public:
       explicit trezor_pairing_ui(device_trezor_base * device): m_device(device) {}
       boost::optional<std::string> on_pairing_code_request() override;
+      boost::optional<std::string> on_passphrase_request(bool &on_device) override;
       std::string host_name() const override;
       std::string app_name() const override;
     private:
@@ -307,6 +308,12 @@ namespace trezor {
      * Returns boost::none when there is no callback or the user cancelled.
      */
     boost::optional<epee::wipeable_string> on_pairing_code_request();
+
+    /**
+     * Resolve the passphrase for THP session creation, applying the same
+     * empty-passphrase and stored-passphrase policy as the legacy handler.
+     */
+    boost::optional<epee::wipeable_string> request_passphrase(bool & on_device);
 
     /* ======================================================================= */
     /*                              SETUP/TEARDOWN                             */

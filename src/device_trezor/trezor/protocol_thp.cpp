@@ -837,6 +837,19 @@ void ProtocolThp::end_handshake(Transport &transport) {
 }
 
 void ProtocolThp::create_session(Transport &transport) {
+  // Unlike the legacy protocol, THP does not ask for the passphrase mid-flow
+  // with a PassphraseRequest: it is a parameter of session creation. If one has
+  // not been set explicitly, ask the UI now.
+  if (!m_passphrase && !m_passphrase_on_device && m_pairing_ui) {
+    bool on_device = false;
+    const auto passphrase = m_pairing_ui->on_passphrase_request(on_device);
+    if (on_device) {
+      m_passphrase_on_device = true;
+    } else if (passphrase) {
+      m_passphrase = *passphrase;
+    }
+  }
+
   mthp::ThpCreateNewSession req;
   if (m_passphrase_on_device) {
     req.set_on_device(true);

@@ -464,6 +464,34 @@ namespace trezor {
       return code;
     }
 
+    boost::optional<epee::wipeable_string> device_trezor_base::request_passphrase(bool & on_device)
+    {
+      // Same policy as the PassphraseRequest handler, but reached from session
+      // creation because THP takes the passphrase as a session parameter rather
+      // than asking for it mid-flow.
+      MDEBUG("request_passphrase");
+      boost::optional<epee::wipeable_string> passphrase;
+      if (m_reply_with_empty_passphrase || m_always_use_empty_passphrase) {
+        on_device = false;
+        passphrase = epee::wipeable_string("");
+      } else if (m_passphrase) {
+        MWARNING("Answering passphrase prompt with a stored passphrase (do not use; passphrase can be seen by a potential malware / attacker)");
+        on_device = false;
+        passphrase = epee::wipeable_string(m_passphrase.get());
+      } else {
+        TREZOR_CALLBACK_GET(passphrase, on_passphrase_request, on_device);
+      }
+      return passphrase;
+    }
+
+    boost::optional<std::string> trezor_pairing_ui::on_passphrase_request(bool &on_device)
+    {
+      if (!m_device) { on_device = true; return boost::none; }
+      const auto passphrase = m_device->request_passphrase(on_device);
+      if (on_device || !passphrase) return boost::none;
+      return std::string(passphrase->data(), passphrase->size());
+    }
+
     boost::optional<std::string> trezor_pairing_ui::on_pairing_code_request()
     {
       if (!m_device) return boost::none;

@@ -125,6 +125,19 @@ public:
    */
   virtual boost::optional<std::string> on_pairing_code_request() = 0;
 
+  /**
+   * Called while creating a session.
+   *
+   * Under THP the passphrase is supplied up front in ThpCreateNewSession
+   * rather than in response to a PassphraseRequest, so it has to be collected
+   * here instead of during the message exchange. Set `on_device` to have the
+   * user type it on the Trezor itself.
+   */
+  virtual boost::optional<std::string> on_passphrase_request(bool &on_device) {
+    on_device = false;
+    return boost::none;
+  }
+
   /** Human-readable host name reported to the device during pairing. */
   virtual std::string host_name() const { return "Feather"; }
   /** Human-readable application name reported to the device during pairing. */
