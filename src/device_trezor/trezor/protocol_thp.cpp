@@ -738,9 +738,15 @@ void ProtocolThp::code_entry_pairing(Transport &transport) {
   CHECK_AND_ASSERT_THROW_MES(trezor_cpace_pub.size() == 32,
                              "THP: malformed Trezor CPace public key");
 
-  // Ask the user for the code shown on the device.
+  // Ask the user for the code shown on the device. An empty result means either
+  // a genuine cancellation or that the wallet front-end never surfaced the
+  // prompt; say so, because the two are indistinguishable from here and the
+  // second looks like an instant cancellation to the user.
   const auto code_opt = m_pairing_ui->on_pairing_code_request();
-  CHECK_AND_ASSERT_THROW_MES(code_opt, "THP: pairing cancelled by the user");
+  CHECK_AND_ASSERT_THROW_MES(
+      code_opt,
+      "THP: no pairing code was supplied - either pairing was cancelled, or this "
+      "application does not implement the pairing code prompt");
   const std::string code = *code_opt;
   CHECK_AND_ASSERT_THROW_MES(
       code.size() == 6 &&
