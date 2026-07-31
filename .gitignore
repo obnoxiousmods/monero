@@ -118,3 +118,4 @@ nbproject
 __pycache__/
 *.pyc
 *.log
+build-native/

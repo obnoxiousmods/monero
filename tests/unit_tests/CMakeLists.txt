@@ -87,6 +87,7 @@ set(unit_tests_sources
   test_peerlist.cpp
   test_protocol_pack.cpp
   threadpool.cpp
+  trezor_thp.cpp
   tx_proof.cpp
   hardfork.cpp
   unbound.cpp
@@ -124,6 +125,7 @@ target_link_libraries(unit_tests
     net
     serialization
     wallet
+    device_trezor
     p2p
     version
     ${Boost_CHRONO_LIBRARY}

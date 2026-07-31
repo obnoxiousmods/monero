@@ -1,7 +1,0 @@
-# CMake generated Testfile for 
-# Source directory: /home/o/feather-safe7/feather/monero/contrib
-# Build directory: /home/o/feather-safe7/feather/monero/build-native/contrib
-# 
-# This file includes the relevant testing commands required for 
-# testing this directory and lists subdirectories to be tested as well.
-subdirs("epee")
