@@ -1203,6 +1203,13 @@ boost::optional<epee::wipeable_string> wallet_device_callback::on_passphrase_req
   return boost::none;
 }
 
+boost::optional<epee::wipeable_string> wallet_device_callback::on_pairing_code_request()
+{
+  if (wallet)
+    return wallet->on_device_pairing_code_request();
+  return boost::none;
+}
+
 void wallet_device_callback::on_progress(const hw::device_progress& event)
 {
   if (wallet)
@@ -16600,6 +16607,13 @@ boost::optional<epee::wipeable_string> wallet2::on_device_passphrase_request(boo
     return m_callback->on_device_passphrase_request(on_device);
   else
     on_device = true;
+  return boost::none;
+}
+//----------------------------------------------------------------------------------------------------
+boost::optional<epee::wipeable_string> wallet2::on_device_pairing_code_request()
+{
+  if (nullptr != m_callback)
+    return m_callback->on_device_pairing_code_request();
   return boost::none;
 }
 //----------------------------------------------------------------------------------------------------

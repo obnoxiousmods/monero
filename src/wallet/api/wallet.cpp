@@ -318,7 +318,11 @@ struct Wallet2CallbackImpl : public tools::i_wallet2_callback
       return boost::none;
     }
 
-    virtual boost::optional<epee::wipeable_string> on_pairing_code_request()
+    // Note the name: this overrides i_wallet2_callback, which prefixes the
+    // device callbacks with on_device_. The hw::i_device_callback method of the
+    // same purpose is called on_pairing_code_request and is bridged to this one
+    // by wallet_device_callback.
+    virtual boost::optional<epee::wipeable_string> on_device_pairing_code_request() override
     {
       if (m_listener) {
         auto code = m_listener->onDevicePairingCodeRequest();

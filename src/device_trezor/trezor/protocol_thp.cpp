@@ -256,6 +256,33 @@ void ProtocolThp::clear_passphrase() {
 
 // --- transport helpers -----------------------------------------------------
 
+void ProtocolThp::throw_transport_error(uint8_t code) {
+  // Any of these leave the channel unusable, so drop our state; the next
+  // attempt re-allocates and re-handshakes rather than talking to a channel the
+  // device has already forgotten.
+  switch (code) {
+    case static_cast<uint8_t>(TransportError::UNALLOCATED_CHANNEL):
+    case static_cast<uint8_t>(TransportError::DECRYPTION_FAILED):
+    case static_cast<uint8_t>(TransportError::DEVICE_LOCKED):
+      reset_channel();
+      break;
+    default:
+      break;
+  }
+
+  if (code == static_cast<uint8_t>(TransportError::DEVICE_LOCKED)) {
+    // The handshake asks the device to show its PIN prompt rather than refuse
+    // (try_to_unlock), so reaching this means the device declined to unlock -
+    // typically the PIN entry was cancelled or timed out.
+    throw exc::CommunicationException(
+        "THP: the Trezor is locked. Unlock it by entering your PIN on the "
+        "device, then try again");
+  }
+
+  throw exc::CommunicationException(std::string("THP: transport error ") +
+                                    transport_error_to_string(code));
+}
+
 void ProtocolThp::send_ack(Transport &transport, const Message &acked) {
   bool has_seq = false;
   const bool seq = ctrl::get_seq_bit(acked.ctrl_byte, has_seq);
@@ -267,8 +294,7 @@ void ProtocolThp::await_ack(Transport &transport, bool expected_seq_bit) {
   for (int attempt = 0; attempt < 8; ++attempt) {
     const Message msg = thp::read_message(transport);
     if (ctrl::is_error(msg.ctrl_byte) && !msg.data.empty()) {
-      throw exc::CommunicationException(std::string("THP: transport error ") +
-                                        transport_error_to_string(msg.data[0]));
+      throw_transport_error(msg.data[0]);
     }
 
     const bool ack_bit_ok = ctrl::get_ack_bit(msg.ctrl_byte) == expected_seq_bit;
@@ -336,13 +362,7 @@ Message ProtocolThp::read_message(Transport &transport, bool allow_broadcast) {
     }
 
     if (ctrl::is_error(msg.ctrl_byte) && !msg.data.empty()) {
-      const uint8_t code = msg.data[0];
-      if (code == static_cast<uint8_t>(TransportError::UNALLOCATED_CHANNEL) ||
-          code == static_cast<uint8_t>(TransportError::DECRYPTION_FAILED)) {
-        reset_channel();
-      }
-      throw exc::CommunicationException(std::string("THP: transport error ") +
-                                        transport_error_to_string(code));
+      throw_transport_error(msg.data[0]);
     }
 
     bool has_seq = false;

@@ -201,6 +201,9 @@ private:
   void send_message(Transport &transport, thp::Message msg);
   thp::Message read_message(Transport &transport, bool allow_broadcast = false);
   void send_ack(Transport &transport, const thp::Message &acked);
+  /** Translate a transport error code into an exception, resetting the channel
+   *  when the error implies the device has dropped it. Never returns. */
+  [[noreturn]] void throw_transport_error(uint8_t code);
   void await_ack(Transport &transport, bool expected_seq_bit);
 
   // --- secure channel layer ----------------------------------------------
